@@ -4,9 +4,8 @@
   python src/pipeline.py train2    --data-dir dataset --work-dir work
   python src/pipeline.py predict2  --data-dir dataset --work-dir work --out-dir output
 
-Pruning: keep a blocking pair if r_rev <= R or r_fwd <= F.  (R, F) is chosen automatically from
-blocking_grid.json as the cheapest cell within 0.2 pt of the best recall (override --R/--F).
-The pruned set is exactly what the model scores -> it is what we write to candidate_pairs.tsv.
+Pairs: the learned pre-filter's kept set (prefilter.py, default) or, with --R/--F, the blocking pairs
+with r_rev <= R or r_fwd <= F.  That set is exactly what the model scores -> candidate_pairs.tsv.
 
 Decision: GT is strictly 1-to-1 from the S2/S3 side (EDA: 0 of 7.6M matched ids are shared), so
 each S2/S3 record keeps only its most probable S1; then a threshold / expected-F0.5 rule per S1
@@ -40,21 +39,6 @@ def log(m):
     print(f"[{time.time() - T0:7.1f}s] {m}", flush=True)
 
 
-def choose_RF(work_dir, R=None, F=None, tol=0.002):
-    if R is not None and F is not None:
-        return R, F
-    path = os.path.join(work_dir, "blocking_grid.json")
-    if not os.path.exists(path):
-        return 5, 5
-    grid = json.load(open(path))
-    best = max(v[0] for v in grid.values())
-    ok = [(v[1], k) for k, v in grid.items() if v[0] >= best - tol]
-    _, key = min(ok)
-    r, f = key[1:].split("_F")
-    log(f"auto-pruning: best recall {best:.4f}; chose {key} (recall {grid[key][0]:.4f}, {grid[key][1]:,} pairs)")
-    return int(r), int(f)
-
-
 def feat_path(work_dir, split):
     return os.path.join(work_dir, "feat", f"{split}.parquet")
 
@@ -62,13 +46,21 @@ def feat_path(work_dir, split):
 def features(work_dir, split, R, F, jobs, force=False):
     path = feat_path(work_dir, split)
     meta = os.path.join(work_dir, "feat", f"{split}.meta.json")
-    if os.path.exists(path) and not force and os.path.exists(meta) and json.load(open(meta)) == {"R": R, "F": F}:
+    pruned = os.path.join(work_dir, "cands", f"{split}_pruned.parquet")
+    src = pruned if R is None and os.path.exists(pruned) else os.path.join(work_dir, "cands", f"{split}.parquet")
+    if (os.path.exists(path) and not force and os.path.exists(meta) and json.load(open(meta)) == {"R": R, "F": F}
+            and os.path.getmtime(path) > os.path.getmtime(src)):
         log(f"{split}: cached features {path}")
         return
-    cands = pd.read_parquet(os.path.join(work_dir, "cands", f"{split}.parquet"))
-    pairs = cands[(cands.r_rev <= R) | (cands.r_fwd <= F)].reset_index(drop=True)
-    log(f"{split}: pruned {len(cands):,} -> {len(pairs):,} pairs (R={R}, F={F})")
-    del cands
+    if R is None and os.path.exists(pruned):                      # learned pre-filter (prefilter.py)
+        pairs = pd.read_parquet(pruned)
+        log(f"{split}: {len(pairs):,} pairs from the learned pre-filter")
+    else:
+        R, F = (R, F) if R is not None else (5, 5)
+        cands = pd.read_parquet(os.path.join(work_dir, "cands", f"{split}.parquet"))
+        pairs = cands[(cands.r_rev <= R) | (cands.r_fwd <= F)].reset_index(drop=True)
+        log(f"{split}: pruned {len(cands):,} -> {len(pairs):,} pairs (R={R}, F={F})")
+        del cands
     P1 = load_prep(work_dir, split, (1,), PREP_COLS)
     PO = load_prep(work_dir, split, (2, 3), PREP_COLS)
     X = build(pairs, P1, PO, jobs or os.cpu_count(), log=log)

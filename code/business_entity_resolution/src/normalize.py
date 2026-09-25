@@ -99,8 +99,9 @@ STATE_CANON = {
     "bihar": "br", "br": "br", "odisha": "od", "orissa": "od", "od": "od",
 }
 
-# US states: full name -> USPS code (applied to addresses; only full names are mapped, so
-# 2-letter codes are never re-interpreted inside non-US text)
+# US states: full name -> USPS code. Only mapped when a WHOLE comma-separated address component is
+# a state name ("Michigan City" and "Washington Avenue" stay as they are); 2-letter codes are
+# never re-interpreted.
 US_STATES = {
     "alabama": "al", "alaska": "ak", "arizona": "az", "arkansas": "ar", "california": "ca", "colorado": "co",
     "connecticut": "ct", "delaware": "de", "florida": "fl", "georgia": "ga", "hawaii": "hi", "idaho": "id",
@@ -113,11 +114,6 @@ US_STATES = {
     "utah": "ut", "vermont": "vt", "virginia": "va", "washington": "wa", "west virginia": "wv",
     "wisconsin": "wi", "wyoming": "wy", "district of columbia": "dc",
 }
-# "washington"/"virginia" also occur as street / city names: only map them when they are the
-# LAST address component (see _map_states)
-_STATE_TAIL_ONLY = {"washington", "virginia"}
-_MULTI_STATES = sorted([k for k in list(US_STATES) + list(STATE_CANON) if " " in k], key=len, reverse=True)
-_MULTI_RE = re.compile(r"\b(" + "|".join(map(re.escape, _MULTI_STATES)) + r")\b")
 
 # Learned token synonyms (see synonyms.py): transliterated-script / alias token -> canonical
 # token, mined from TRAINING matched pairs only.  Loaded once per process.
@@ -190,7 +186,8 @@ def _name_tokens(name: str) -> list[str]:
         return []
     s = _DOMAIN.sub(lambda m: " " + m.group(1) + " ", name)          # bydynamic.com -> bydynamic
     toks = [_fix_leet(t) for t in basic_clean(s).split()]
-    return _canon_tokens(_syn(toks, SYN_NAME), LEGAL_CANON)
+    # learned synonyms are mined on canonicalised tokens -> apply them last
+    return _syn(_canon_tokens(toks, LEGAL_CANON), SYN_NAME)
 
 
 @lru_cache(maxsize=1 << 16)
@@ -222,26 +219,24 @@ def split_dba(name: str) -> list[str]:
     return [name] + parts if len(parts) > 1 else [name]
 
 
-def _map_states(s: str) -> str:
-    s = _MULTI_RE.sub(lambda m: US_STATES.get(m.group(1)) or STATE_CANON.get(m.group(1)), s)
-    toks = s.split()
-    out = []
-    for i, t in enumerate(toks):
-        if t in US_STATES and (t not in _STATE_TAIL_ONLY or i == len(toks) - 1):
-            out.append(US_STATES[t])
-        else:
-            out.append(STATE_CANON.get(t, t) if len(t) > 3 else t)
-    return " ".join(out)
+def _state_code(comp: str) -> str | None:
+    """Code for an address COMPONENT that is exactly a state name ('Michigan City' is not)."""
+    return US_STATES.get(comp) or STATE_CANON.get(comp)
 
 
 @lru_cache(maxsize=1 << 16)
 def norm_addr(addr: str) -> str:
+    """Normalise per comma-separated component: state names only when they are a whole component,
+    abbreviations canonicalised, learned synonyms applied last (they were mined on this output)."""
     if not isinstance(addr, str):
         return ""
-    s = basic_clean(_NULLS.sub(" ", addr))
-    s = " ".join(_syn(s.split(), SYN_ADDR))
-    s = _map_states(s)
-    return " ".join(_canon_tokens(s.split(), ADDR_CANON))
+    comps = []
+    for comp in _NULLS.sub(" ", addr).split(","):
+        c = basic_clean(comp)
+        if c:
+            comps.append(_state_code(c) or c)
+    toks = _canon_tokens(" ".join(comps).split(), ADDR_CANON)
+    return " ".join(_syn(toks, SYN_ADDR))
 
 
 def acronym(name: str) -> str:

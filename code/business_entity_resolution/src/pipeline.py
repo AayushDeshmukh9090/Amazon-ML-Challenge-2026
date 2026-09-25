@@ -215,15 +215,19 @@ def cmd_prep(args):
 def cmd_block(args):
     from block import block_split, recall_report
     for split in args.splits.split(","):
-        s1, oth, cands = block_split(args.work_dir, split, args.k_rev, args.k_fwd, args.df_cap, args.jobs)
+        s1, oth, cands = block_split(args.work_dir, split, args.k_rev, args.k_fwd, args.df_cap, args.jobs,
+                                     args.df_frac)
         if split == "train":
             recall_report(args.data_dir, args.work_dir, s1, oth, cands, args.k_rev, args.k_fwd)
 
 
-def cmd_stage2(args, which=("features2", "train2", "predict2")):
+def cmd_stage2(args, which=("prefilter", "features2", "train2", "predict2")):
     import stage2
+    if "prefilter" in which and args.R is None:
+        import prefilter
+        prefilter.run(args.data_dir, args.work_dir, jobs=args.jobs, budget=args.budget)
     if "features2" in which:
-        R, F = stage2.choose_RF(args.work_dir, args.R, args.F)
+        R, F = args.R, args.F
         for split in args.splits.split(","):
             stage2.features(args.work_dir, split, R, F, args.jobs, force=args.force)
     if "train2" in which:
@@ -234,7 +238,8 @@ def cmd_stage2(args, which=("features2", "train2", "predict2")):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["synonyms", "prep", "block", "stage1", "features2", "train2", "predict2",
+    ap.add_argument("cmd", choices=["synonyms", "prep", "block", "stage1", "prefilter", "features2", "train2",
+                                    "predict2",
                                     "stage2", "full",
                                     "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
@@ -251,13 +256,15 @@ def main():
     ap.add_argument("--splits", default="train,test")
     ap.add_argument("--k-rev", type=int, default=10)
     ap.add_argument("--k-fwd", type=int, default=20)
-    ap.add_argument("--df-cap", type=int, default=3000)
+    ap.add_argument("--df-cap", type=int, default=3000, help="min document-frequency cap for block tokens")
+    ap.add_argument("--df-frac", type=float, default=0.004, help="cap = max(df-cap, df-frac * block size)")
     ap.add_argument("--R", type=int, default=None, help="prune: keep r_rev <= R (default: auto)")
     ap.add_argument("--F", type=int, default=None, help="prune: keep r_fwd <= F (default: auto)")
     ap.add_argument("--train-frac", type=float, default=0.25, help="share of S1 entities used per fold model")
     ap.add_argument("--max-rounds", type=int, default=2000)
+    ap.add_argument("--budget", type=float, default=4.0, help="prefilter: kept pairs per S2/S3 record")
     args = ap.parse_args()
-    if args.cmd in ("features2", "train2", "predict2"):
+    if args.cmd in ("prefilter", "features2", "train2", "predict2"):
         return cmd_stage2(args, (args.cmd,))
     if args.cmd == "stage2":
         return cmd_stage2(args)

@@ -79,10 +79,28 @@ def _topk_chunk(args):
             S.data[order][keep].astype(np.float32), (rank[keep] + 1).astype(np.uint8))
 
 
-def topk(Q, I, k, jobs, rows_per_chunk=4000):
+def _chunks_by_cost(Q, I, max_cost=15_000_000, max_rows=20_000):
+    """Split query rows so each chunk's sparse product has <= ~max_cost entries (bounded memory
+    per worker even when common tokens have long posting lists)."""
+    df = np.asarray((I > 0).sum(0)).ravel().astype(np.int64)
+    cost = (Q > 0).astype(np.int64) @ df
+    bounds, lo, acc = [], 0, 0
+    for r, c in enumerate(cost):
+        if r > lo and (acc + c > max_cost or r - lo >= max_rows):
+            bounds.append((lo, r))
+            lo, acc = r, 0
+        acc += c
+    if lo < Q.shape[0]:
+        bounds.append((lo, Q.shape[0]))
+    return bounds, int(cost.sum())
+
+
+def topk(Q, I, k, jobs):
     """For each row of Q, top-k rows of I by dot product (both L2-normalised) -> (q, i, score, rank)."""
     _G["Q"], _G["IT"] = Q, I.T.tocsr()
-    tasks = [(lo, min(lo + rows_per_chunk, Q.shape[0]), k) for lo in range(0, Q.shape[0], rows_per_chunk)]
+    bounds, total = _chunks_by_cost(Q, I)
+    log(f"    {len(bounds)} chunks, {total / 1e9:.2f}G posting entries")
+    tasks = [(lo, hi, k) for lo, hi in bounds]
     if jobs > 1 and len(tasks) > 1 and hasattr(os, "fork"):   # Windows: no fork -> single process
         ctx = mp.get_context("fork")
         with ctx.Pool(jobs) as pool:
@@ -109,7 +127,7 @@ def weight(A, B, df_cap):
     return A.tocsr(), B.tocsr(), int(keep.sum())
 
 
-def block_split(work_dir, split, k_rev=10, k_fwd=20, df_cap=3000, jobs=None):
+def block_split(work_dir, split, k_rev=10, k_fwd=20, df_cap=3000, jobs=None, df_frac=0.004):
     jobs = jobs or os.cpu_count()
     s1 = load_prep(work_dir, split, (1,), ["entity_id", "ckey", "btok"])
     oth = load_prep(work_dir, split, (2, 3), ["entity_id", "ckey", "btok"])
@@ -127,9 +145,10 @@ def block_split(work_dir, split, k_rev=10, k_fwd=20, df_cap=3000, jobs=None):
         ib = g2.get(c)
         if ib is None or not len(ib):
             continue
-        A, B, nkeep = weight(A_all[ia], B_all[ib], df_cap)
+        cap = max(df_cap, int(df_frac * (len(ia) + len(ib))))   # relative to block size
+        A, B, nkeep = weight(A_all[ia], B_all[ib], cap)
         empty_b = float((np.diff(B.indptr) == 0).mean())
-        log(f"[{c}] S1 {len(ia):,} x other {len(ib):,}; kept tokens {nkeep:,}; "
+        log(f"[{c}] S1 {len(ia):,} x other {len(ib):,}; df cap {cap:,}; kept tokens {nkeep:,}; "
             f"records with no usable token: S1 {(np.diff(A.indptr) == 0).mean():.2%}, other {empty_b:.2%}")
         q, i, sc, rk = topk(B, A, k_rev, jobs)            # reverse: other -> S1
         rev = pd.DataFrame({"s1": ia[i], "o": ib[q], "score": sc, "r_rev": rk, "r_fwd": np.uint8(NOPE)})

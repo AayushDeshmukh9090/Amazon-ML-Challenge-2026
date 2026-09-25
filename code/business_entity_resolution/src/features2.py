@@ -213,8 +213,9 @@ def build(pairs: pd.DataFrame, P1: pd.DataFrame, PO: pd.DataFrame, jobs: int, ch
     X = pd.concat(parts, ignore_index=True)
     X.insert(0, "o", oi)
     X.insert(0, "s1", s1i)
-    for c in ("score", "r_rev", "r_fwd"):
-        X[c] = pairs[c].values.astype(np.float32)
+    for c in ("score", "r_rev", "r_fwd", "p1"):
+        if c in pairs:
+            X[c] = pairs[c].values.astype(np.float32)
     X["is_s3"] = PO["entity_id"].str.startswith("S3").values[oi].astype(np.float32)
     # frequency of the core name within the split (chains / generic names)
     h1 = pd.util.hash_array(P1["c_name"].values.astype(str))

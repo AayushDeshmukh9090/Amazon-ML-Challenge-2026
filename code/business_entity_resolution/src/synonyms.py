@@ -22,6 +22,7 @@ from collections import Counter
 
 import numpy as np
 import pandas as pd
+from rapidfuzz import fuzz
 
 import normalize as N
 
@@ -56,22 +57,38 @@ def _ok(t):
     return not any(c.isdigit() for c in t) and t not in _LEGAL
 
 
+def _is_variant(b, a, script_share):
+    """Keep only true spelling variants: transliterations from Indic scripts (b mostly comes from
+    non-ASCII text) or misspellings / abbreviations that still look like the target.  Rejects
+    place-hierarchy swaps (richmond->county, dorchester->boston, ap->ts) that would erase identity."""
+    return script_share >= 0.5 or fuzz.ratio(b, a) >= 50
+
+
 def mine(pairs, rec, tok_fn, field, min_count, min_ratio, max_diff=3):
-    co, seen_b = Counter(), Counter()
+    co, seen_b, script_b = Counter(), Counter(), Counter()
     for a_id, b_id in pairs:
-        ta, tb = tok_fn(rec[a_id][field]), tok_fn(rec[b_id][field])
+        raw_b = rec[b_id][field]
+        ta, tb = tok_fn(rec[a_id][field]), tok_fn(raw_b)
         A = [t for t in ta - tb if _ok(t)]
         B = [t for t in tb - ta if _ok(t) and len(t) >= 2]
         if not B or len(A) > max_diff or len(B) > max_diff:
             continue
         seen_b.update(B)
+        if any(ord(ch) > 0x24F for ch in raw_b):           # beyond Latin Extended = Indic etc. script
+            script_b.update(B)
         for b in B:
             for a in A:
                 co[(b, a)] += 1
-    best = {}
+    best, rejected = {}, []
     for (b, a), c in co.items():
         if c >= min_count and c / seen_b[b] >= min_ratio and c > best.get(b, (None, 0))[1]:
-            best[b] = (a, c)
+            if _is_variant(b, a, script_b[b] / seen_b[b]):
+                best[b] = (a, c)
+            else:
+                rejected.append((c, b, a))
+    if rejected:
+        log(f"  rejected {len(rejected)} non-variant {field} maps, e.g. "
+            + ", ".join(f"{b}->{a}({c})" for c, b, a in sorted(rejected, reverse=True)[:15]))
     return {b: a for b, (a, c) in best.items()}, co, seen_b
 
 
