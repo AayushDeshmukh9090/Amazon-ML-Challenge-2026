@@ -8,6 +8,8 @@ dataset/test/*
 !dataset/train/.gitkeep
 !dataset/test/.gitkeep
 dataset_sample/
+Amazon_ML_Challenge_Dataset/
+student_resource/
 dataset_synth/
 
 # ---- generated ----
