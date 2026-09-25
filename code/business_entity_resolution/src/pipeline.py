@@ -202,36 +202,90 @@ def cmd_features(args):
         build_split(args.data_dir, split, BlockConfig(), args.work_dir, use_cache=not args.no_cache)
 
 
+# ============================================================================ large-scale pipeline (v2)
+# DATA part  : synonyms -> prep -> block -> prefilter -> features2   (cached in work/, incremental)
+# MODEL part : train2 -> predict2                                    (reads the cached features only)
+# Every data step skips itself when its outputs are newer than its inputs, so re-running `data` or
+# `full` after a model-only change costs seconds.  `--rebuild STEP` forces one step; everything
+# downstream of it is then refreshed automatically because its inputs became newer.
+DATA_STEPS = ["synonyms", "prep", "block", "prefilter", "features"]
+
+
+def _fresh(outputs, inputs):
+    if not all(os.path.exists(o) for o in outputs):
+        return False
+    newest_in = max((os.path.getmtime(i) for i in inputs if os.path.exists(i)), default=0)
+    return min(os.path.getmtime(o) for o in outputs) >= newest_in
+
+
+def _forced(args, step):
+    return args.force or args.rebuild == step
+
+
+def _skip(step, outputs):
+    log(f"[{step}] up to date - skipped ({', '.join(os.path.relpath(o) for o in outputs[:2])}...)")
+
+
 def cmd_synonyms(args):
     from synonyms import learn
+    out = [os.path.join(args.work_dir, "synonyms.json")]
+    ins = [os.path.join(args.data_dir, "train", f) for f in
+           ("train_source1.tsv", "train_source2.tsv", "train_source3.tsv", "train_ground_truth.tsv")]
+    if not _forced(args, "synonyms") and _fresh(out, ins):
+        return _skip("synonyms", out)
     learn(args.data_dir, args.work_dir, n_pairs=args.syn_pairs)
 
 
 def cmd_prep(args):
     from prep import prep_all
-    prep_all(args.data_dir, args.work_dir, jobs=args.jobs, force=args.force)
+    prep_all(args.data_dir, args.work_dir, jobs=args.jobs, force=_forced(args, "prep"))
 
 
 def cmd_block(args):
     from block import block_split, recall_report
     for split in args.splits.split(","):
+        out = [os.path.join(args.work_dir, "cands", f"{split}.parquet")]
+        ins = [os.path.join(args.work_dir, "prep", f"{split}_s{k}.parquet") for k in (1, 2, 3)]
+        if not _forced(args, "block") and _fresh(out, ins):
+            _skip(f"block {split}", out)
+            continue
         s1, oth, cands = block_split(args.work_dir, split, args.k_rev, args.k_fwd, args.df_cap, args.jobs,
                                      args.df_frac)
         if split == "train":
             recall_report(args.data_dir, args.work_dir, s1, oth, cands, args.k_rev, args.k_fwd)
 
 
-def cmd_stage2(args, which=("prefilter", "features2", "train2", "predict2")):
+def cmd_prefilter(args):
+    if args.R is not None:          # fixed rank cut instead of the learned pre-filter
+        return
+    import prefilter
+    c = os.path.join(args.work_dir, "cands")
+    out = [os.path.join(c, "train_pruned.parquet"), os.path.join(c, "test_pruned.parquet"),
+           os.path.join(args.work_dir, "prefilter.pkl")]
+    ins = [os.path.join(c, "train.parquet"), os.path.join(c, "test.parquet")]
+    if not _forced(args, "prefilter") and _fresh(out, ins):
+        return _skip("prefilter", out)
+    prefilter.run(args.data_dir, args.work_dir, jobs=args.jobs, budget=args.budget)
+
+
+def cmd_features2(args):
     import stage2
-    if "prefilter" in which and args.R is None:
-        import prefilter
-        prefilter.run(args.data_dir, args.work_dir, jobs=args.jobs, budget=args.budget)
-    if "features2" in which:
-        R, F = args.R, args.F
-        for split in args.splits.split(","):
-            stage2.features(args.work_dir, split, R, F, args.jobs, force=args.force)
+    for split in args.splits.split(","):
+        stage2.features(args.work_dir, split, args.R, args.F, args.jobs, force=_forced(args, "features"))
+
+
+def cmd_data(args):
+    cmd_synonyms(args)
+    cmd_prep(args)
+    cmd_block(args)
+    cmd_prefilter(args)
+    cmd_features2(args)
+
+
+def cmd_model(args, which=("train2", "predict2")):
+    import stage2
     if "train2" in which:
-        stage2.train(args.data_dir, args.work_dir, train_frac=args.train_frac, max_rounds=args.max_rounds,
+        stage2.train(args.data_dir, args.work_dir, n_folds=args.k_folds, max_rounds=args.max_rounds,
                      backend=args.gbm)
     if "predict2" in which:
         stage2.predict(args.work_dir, args.out_dir)
@@ -239,9 +293,8 @@ def cmd_stage2(args, which=("prefilter", "features2", "train2", "predict2")):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["synonyms", "prep", "block", "stage1", "prefilter", "features2", "train2",
-                                    "predict2",
-                                    "stage2", "full",
+    ap.add_argument("cmd", choices=["data", "model", "full",
+                                    "synonyms", "prep", "block", "prefilter", "features2", "train2", "predict2",
                                     "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
     ap.add_argument("--work-dir", default="work")
@@ -252,7 +305,9 @@ def main():
     ap.add_argument("--with-test", action="store_true", help="blocking: also run on test (no recall)")
     # large-scale stages (v2)
     ap.add_argument("--jobs", type=int, default=None, help="worker processes (default: all cores)")
-    ap.add_argument("--force", action="store_true", help="prep: rebuild even if up to date")
+    ap.add_argument("--force", action="store_true", help="rebuild every data step even if up to date")
+    ap.add_argument("--rebuild", choices=DATA_STEPS, default=None,
+                    help="force one data step; everything downstream refreshes automatically")
     ap.add_argument("--syn-pairs", type=int, default=800_000)
     ap.add_argument("--splits", default="train,test")
     ap.add_argument("--k-rev", type=int, default=10)
@@ -262,30 +317,21 @@ def main():
     ap.add_argument("--R", type=int, default=None, help="prune: keep r_rev <= R (default: auto)")
     ap.add_argument("--F", type=int, default=None, help="prune: keep r_fwd <= F (default: auto)")
     ap.add_argument("--train-frac", type=float, default=0.25, help="share of S1 entities used per fold model")
-    ap.add_argument("--max-rounds", type=int, default=2000)
+    ap.add_argument("--max-rounds", type=int, default=3000)
+    ap.add_argument("--k-folds", type=int, default=3, help="stage-2 folds by S1 entity (level 1 and level 2)")
     ap.add_argument("--gbm", default="auto", choices=["auto", "xgb", "lgb"],
                     help="auto = XGBoost on GPU if one is present, else LightGBM on CPU")
     ap.add_argument("--budget", type=float, default=4.0, help="prefilter: kept pairs per S2/S3 record")
     args = ap.parse_args()
-    if args.cmd in ("prefilter", "features2", "train2", "predict2"):
-        return cmd_stage2(args, (args.cmd,))
-    if args.cmd == "stage2":
-        return cmd_stage2(args)
-    if args.cmd == "full":  # the whole large-scale pipeline
-        cmd_synonyms(args)
-        cmd_prep(args)
-        cmd_block(args)
-        return cmd_stage2(args)
-    if args.cmd == "synonyms":
-        return cmd_synonyms(args)
-    if args.cmd == "prep":
-        return cmd_prep(args)
-    if args.cmd == "block":
-        return cmd_block(args)
-    if args.cmd == "stage1":  # synonyms -> prep -> block in one go
-        cmd_synonyms(args)
-        cmd_prep(args)
-        return cmd_block(args)
+    v2 = {"synonyms": cmd_synonyms, "prep": cmd_prep, "block": cmd_block, "prefilter": cmd_prefilter,
+          "features2": cmd_features2, "data": cmd_data,
+          "train2": lambda a: cmd_model(a, ("train2",)), "predict2": lambda a: cmd_model(a, ("predict2",)),
+          "model": cmd_model}
+    if args.cmd in v2:
+        return v2[args.cmd](args)
+    if args.cmd == "full":          # data (incremental) + model
+        cmd_data(args)
+        return cmd_model(args)
     if args.cmd == "blocking":
         return cmd_blocking(args)
     if args.cmd == "features":

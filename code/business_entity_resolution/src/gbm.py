@@ -30,7 +30,7 @@ def resolve(backend: str) -> str:
 LGB = dict(objective="binary", learning_rate=0.05, num_leaves=127, min_child_samples=100,
            feature_fraction=0.7, bagging_fraction=0.7, bagging_freq=1, lambda_l2=10.0, max_bin=255,
            verbose=-1, num_threads=0)
-XGB = dict(objective="binary:logistic", eval_metric="logloss", eta=0.05, max_depth=0, grow_policy="lossguide",
+XGB = dict(objective="binary:logistic", eval_metric="logloss", eta=0.08, max_depth=0, grow_policy="lossguide",
            max_leaves=127, min_child_weight=5, subsample=0.7, colsample_bytree=0.7, reg_lambda=10.0,
            max_bin=256, tree_method="hist")
 

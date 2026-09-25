@@ -7,9 +7,9 @@ One-time setup (on your laptop):
 Every run is launched from the repo root:
     modal run remote/modal_app.py --upload        # first time / when dataset changes: push dataset/ to a Modal Volume
     modal run remote/modal_app.py                 # full large-scale pipeline (default task "full"), then download results
-    modal run remote/modal_app.py --task eda      # any task: eda | stage1 | synonyms | prep | block | ...
+    modal run remote/modal_app.py --task model    # any task: eda | data | model | full | synonyms | prep | ...
     modal run remote/modal_app.py --task train --extra "--folds 5 --skip-loco"
-    modal run remote/modal_app.py --gpu no        # force CPU only (default: GPU for full/stage2/train2/predict2)
+    modal run remote/modal_app.py --gpu no        # force CPU only (default: GPU for full/model/train2/predict2)
     modal run --detach remote/modal_app.py        # keeps running if your laptop sleeps / disconnects;
                                                   # afterwards fetch results with:  --task download
 
@@ -33,7 +33,7 @@ CPU = 32            # cores: prep / blocking / features run in process pools
 MEMORY_MB = 131072  # 128 GB: ~12M-record token matrices + ~100M candidate pairs
 TIMEOUT_S = 6 * 3600
 GPU = "L4"          # 24 GB NVIDIA GPU for XGBoost training/prediction (tasks in GPU_TASKS)
-GPU_TASKS = {"full", "stage2", "train2", "predict2"}
+GPU_TASKS = {"full", "model", "train2", "predict2"}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)

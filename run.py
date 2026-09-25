@@ -14,10 +14,11 @@ LOCAL / cheap (seconds - few minutes on a laptop):
   zip          build <team>_submission.zip   (python run.py zip --team NAME)
 
 HEAVY (full data - run on Modal: `modal run remote/modal_app.py`, see README):
-  full         synonyms -> prep -> block -> features2 -> train2 -> predict2  (everything)
-  stage1       synonyms -> prep -> block   (writes work/blocking_report.md)
-  stage2       features2 -> train2 -> predict2  (writes work/stage2_report.md, output/)
-  synonyms | prep | block | features2 | train2 | predict2   individual steps
+  data         synonyms -> prep -> block -> prefilter -> features2   (cached, incremental: finished
+               steps are skipped; --rebuild STEP forces one step and refreshes what follows)
+  model        train2 -> predict2 on the cached features   (work/stage2_report.md, output/)
+  full         data + model
+  synonyms | prep | block | prefilter | features2 | train2 | predict2   individual steps
 """
 from __future__ import annotations
 
@@ -124,7 +125,8 @@ def main():
         if not os.path.isdir(os.path.join(ROOT, "dataset_sample")):
             sh(PY, "utils/make_sample.py", "--src", "dataset", "--dst", "dataset_sample")
         pipeline("full", "dataset_sample", rest, work="work_sample", out="output_sample")
-    elif task in ("full", "stage1", "stage2", "synonyms", "prep", "block", "features2", "train2", "predict2"):
+    elif task in ("full", "data", "model", "synonyms", "prep", "block", "prefilter", "features2", "train2",
+                  "predict2"):
         check_data(data)
         pipeline(task, data, rest)
     elif task in ("features", "train", "predict", "all"):  # v1 small-data pipeline (kept for reference)

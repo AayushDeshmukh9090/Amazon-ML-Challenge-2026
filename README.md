@@ -65,11 +65,14 @@ country is a safe block key, addresses are the reliable signal, and distractors 
 | prep | `prep.py` | stream + normalise every file once (parallel) -> `work/prep/*.parquet` |
 | block | `block.py` | IDF-weighted token-overlap search per country, reverse (S2/S3->S1) + forward -> `work/cands/`, `work/blocking_report.md` |
 | features2 | `features2.py` | ~120 pair + competition features on the pruned pairs -> `work/feat/` |
-| train2 | `stage2.py` | LightGBM, 2-fold OOF by S1 entity, 1-to-1 decision tuned for macro F0.5 -> `work/stage2_report.md` |
+| prefilter | `prefilter.py` | cheap learned ranker over all candidates, keeps ~2.5 pairs per S2/S3 record -> `work/cands/*_pruned.parquet` |
+| train2 | `stage2.py` + `gbm.py` | 2-level model (XGBoost on GPU / LightGBM on CPU), 3-fold OOF by S1 entity; level 2 adds per-record / per-entity aggregates of level-1 probabilities; 1-to-1 decision + threshold tuned for macro F0.5 -> `work/stage2_report.md` |
 | predict2 | `stage2.py` | `output/matching_results.tsv`, `output/candidate_pairs.tsv` |
 
-`python run.py full` runs everything, and `stage1` / `stage2` run the halves. On the full data,
-run it on Modal (32 CPU / 128 GB).
+**Data and model are separate.** `data` = synonyms -> prep -> block -> prefilter -> features2, each
+step cached in `work/` and skipped when its inputs have not changed (`--rebuild STEP` forces one
+step, and everything downstream refreshes automatically). `model` = train2 -> predict2, which reads
+only the cached features. `full` = data + model. On Modal: `--task data` (CPU) or `--task model` (GPU).
 
 ## 3. Heavy runs on Modal (recommended: more cores, can run detached)
 

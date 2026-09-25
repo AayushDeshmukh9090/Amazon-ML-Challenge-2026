@@ -1,4 +1,10 @@
-"""Stage 2: prune candidates -> features -> LightGBM (2-fold OOF by S1 entity) -> 1-to-1 decision -> output.
+"""Stage 2: pruned candidates -> features -> 2-level GBM (k-fold OOF by S1 entity) -> 1-to-1 decision -> output.
+
+Level 1 scores each pair from its own features.  Level 2 re-scores it with the level-1 OUT-OF-FOLD
+probabilities aggregated over the record's competing S1 entities and over the S1 entity's other
+candidates (best other probability, number of strong candidates, ...), which is what decides
+"no match" entities and near-duplicate distractors.  Test is scored by averaging the fold models,
+so its probabilities follow the same distribution as the OOF ones the threshold is tuned on.
 
   python src/pipeline.py features2 --work-dir work            # both splits, cached to work/feat/
   python src/pipeline.py train2    --data-dir dataset --work-dir work
@@ -8,8 +14,8 @@ Pairs: the learned pre-filter's kept set (prefilter.py, default) or, with --R/--
 with r_rev <= R or r_fwd <= F.  That set is exactly what the model scores -> candidate_pairs.tsv.
 
 Decision: GT is strictly 1-to-1 from the S2/S3 side (EDA: 0 of 7.6M matched ids are shared), so
-each S2/S3 record keeps only its most probable S1; then a threshold / expected-F0.5 rule per S1
-entity, tuned on out-of-fold predictions for macro F0.5 (singletons included).
+each S2/S3 record keeps only its most probable S1, then a probability threshold tuned for the exact
+macro F0.5 over ALL training S1 entities (vectorised, singletons included).
 """
 from __future__ import annotations
 
@@ -23,10 +29,8 @@ import pandas as pd
 
 import gbm
 from block import true_pairs
-from decide import apply_rule
 from features2 import PREP_COLS, build, feature_columns
 from io_utils import write_id_lists
-from metrics import breakdown
 from prep import load_prep
 
 T0 = time.time()
@@ -65,100 +69,176 @@ def features(work_dir, split, R, F, jobs, force=False):
     log(f"{split}: features {X.shape} -> {path}")
 
 
-def _fold(ids: pd.Series) -> np.ndarray:
+def _folds(ids: pd.Series, k: int) -> np.ndarray:
+    """Deterministic fold per S1 entity (hash of its id)."""
     h = pd.util.hash_array(ids.values.astype(str))
-    return (h % 2).astype(np.int8), (h // 2 % 10_000) / 10_000.0
+    return (h % k).astype(np.int8), (h // k % 10_000) / 10_000.0
 
 
-def _truth_ints(ex, n_s1):
-    t = {i: set() for i in range(n_s1)}
-    for a, b in zip(ex.s1.values, ex.o.values):
-        if a == a and b == b:
-            t[int(a)].add(int(b))
-    return t
+# ----------------------------------------------------------------------------- decision (vectorised)
+def one_to_one_best(s1: np.ndarray, o: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """Boolean mask: pair is the most probable S1 for its S2/S3 record (GT is 1-to-1 from that side)."""
+    order = np.lexsort((-p, o))
+    first = np.ones(len(order), bool)
+    first[1:] = o[order][1:] != o[order][:-1]
+    mask = np.zeros(len(p), bool)
+    mask[order[first]] = True
+    return mask
 
 
-def tune_decision(P: pd.DataFrame, truth: dict, ids, log=log):
-    d = P[["s1", "o", "p"]].rename(columns={"s1": "s1_id", "o": "cand_id"})
+def macro_f05(s1, pred, label, n_true, ids=None):
+    """Exact leaderboard metric: per S1 F0.5 = 1.25*TP / (0.25*|truth| + |pred|), singletons included.
+    s1/pred/label are per-pair arrays; n_true[i] = true matches of S1 i (incl. ones not in candidates)."""
+    n = len(n_true)
+    npred = np.bincount(s1[pred], minlength=n)
+    tp = np.bincount(s1[pred & label], minlength=n)
+    f = np.where(n_true == 0, (npred == 0).astype(float),
+                 np.where(npred == 0, 0.0, 1.25 * tp / (0.25 * n_true + np.maximum(npred, 1))))
+    if ids is not None:
+        f, nt = f[ids], n_true[ids]
+    else:
+        nt = n_true
+    return {"macro": float(f.mean()),
+            "singleton": (float(f[nt == 0].mean()) if (nt == 0).any() else float("nan"), int((nt == 0).sum())),
+            "one": (float(f[nt == 1].mean()) if (nt == 1).any() else float("nan"), int((nt == 1).sum())),
+            "multi": (float(f[nt > 1].mean()) if (nt > 1).any() else float("nan"), int((nt > 1).sum()))}
+
+
+def tune_threshold(s1, o, p, label, n_true, log=log):
+    best_mask = one_to_one_best(s1, o, p)
     res = []
-    for t in np.round(np.arange(0.10, 0.91, 0.05), 2):
-        prm = {"rule": "threshold", "t": float(t), "one_to_one": True, "rel": 1.0}
-        res.append((breakdown(apply_rule(d, prm), truth, ids)["macro"], prm))
-    res.sort(key=lambda x: -x[0])
-    bt = res[0][1]["t"]
-    for t in np.round(np.arange(bt - 0.04, bt + 0.041, 0.01), 2):
-        prm = {"rule": "threshold", "t": float(t), "one_to_one": True, "rel": 1.0}
-        res.append((breakdown(apply_rule(d, prm), truth, ids)["macro"], prm))
-    for bias in (0.0, 0.02, 0.05):
-        prm = {"rule": "expected_f", "bias": bias, "one_to_one": True, "rel": 1.0, "min_p": 0.02}
-        res.append((breakdown(apply_rule(d, prm), truth, ids)["macro"], prm))
-    res.sort(key=lambda x: -x[0])
-    for sc, prm in res[:6]:
-        log(f"  {sc:.5f} {prm}")
+    for t in np.round(np.arange(0.05, 0.96, 0.01), 2):
+        pred = best_mask & (p >= t)
+        res.append((macro_f05(s1, pred, label, n_true)["macro"], float(t)))
+    res.sort(reverse=True)
+    for sc, t in res[:5]:
+        log(f"  threshold {t:.2f}: macro F0.5 {sc:.5f}")
     return res[0][1], res[0][0]
 
 
-def train(data_dir, work_dir, train_frac=0.25, tune_s1=400_000, max_rounds=2000, backend="auto"):
+# ----------------------------------------------------------------------------- level-2 (collective) features
+AGG = ["l1_p", "l1_rank_o", "l1_best_other_o", "l1_gap_o", "l1_n_hi_o", "l1_sum_o",
+       "l1_rank_s1", "l1_max_s1", "l1_best_other_s1", "l1_sum_s1", "l1_n_hi_s1", "l1_n_assigned_s1",
+       "l1_is_best_o"]
+
+
+def _best_other(key, v):
+    """For each row: max of v over the OTHER rows with the same key (-1 if none)."""
+    order = np.lexsort((-v, key))
+    ks, vs = key[order], v[order]
+    first = np.ones(len(ks), bool)
+    first[1:] = ks[1:] != ks[:-1]
+    grp = np.cumsum(first) - 1
+    top = vs[first]
+    second = np.full(len(top), -1.0)
+    sec_idx = np.where(~first & np.r_[False, first[:-1]])[0]       # the 2nd row of each group
+    second[grp[sec_idx]] = vs[sec_idx]
+    out_sorted = np.where(first, second[grp], top[grp])
+    out = np.empty(len(v))
+    out[order] = out_sorted
+    return out
+
+
+def agg_features(X: pd.DataFrame, p: np.ndarray) -> pd.DataFrame:
+    s1, o = X["s1"].to_numpy(), X["o"].to_numpy()
+    ps = pd.Series(p)
+    A = pd.DataFrame({"l1_p": p.astype(np.float32)})
+    go, gs = ps.groupby(o), ps.groupby(s1)
+    A["l1_rank_o"] = go.rank(ascending=False, method="first").to_numpy(np.float32)
+    A["l1_best_other_o"] = _best_other(o, p).astype(np.float32)
+    A["l1_gap_o"] = (p - A["l1_best_other_o"].to_numpy()).astype(np.float32)
+    hi = (p >= 0.5).astype(np.float32)
+    A["l1_n_hi_o"] = pd.Series(hi).groupby(o).transform("sum").to_numpy(np.float32)
+    A["l1_sum_o"] = go.transform("sum").to_numpy(np.float32)
+    A["l1_rank_s1"] = gs.rank(ascending=False, method="first").to_numpy(np.float32)
+    A["l1_max_s1"] = gs.transform("max").to_numpy(np.float32)
+    A["l1_best_other_s1"] = _best_other(s1, p).astype(np.float32)
+    A["l1_sum_s1"] = gs.transform("sum").to_numpy(np.float32)
+    A["l1_n_hi_s1"] = pd.Series(hi).groupby(s1).transform("sum").to_numpy(np.float32)
+    best = one_to_one_best(s1, o, p)
+    A["l1_is_best_o"] = best.astype(np.float32)
+    A["l1_n_assigned_s1"] = pd.Series((best & (p >= 0.5)).astype(np.float32)).groupby(s1).transform(
+        "sum").to_numpy(np.float32)
+    return A
+
+
+# ----------------------------------------------------------------------------- training
+def _kfold(backend, X, y, feats, fold, u, k, max_rounds, tag, log=log):
+    """k-fold by S1 entity -> (OOF predictions, models, best iterations)."""
+    oof = np.zeros(len(X))
+    models, iters = [], []
+    for f in range(k):
+        tr = fold != f
+        es = (fold == f) & (u < 0.08)                         # early-stopping slice of the held-out fold
+        m = gbm.fit(backend, X.loc[tr, feats], y[tr], feats, max_rounds, seed=f,
+                    Xva=X.loc[es, feats], yva=y[es], log=log)
+        oof[fold == f] = m.predict(X.loc[fold == f, feats])
+        models.append(m)
+        iters.append(m.best_iteration)
+        log(f"{tag} fold {f}: trained on {tr.sum():,} pairs, best_iter {m.best_iteration}")
+    return oof, models, iters
+
+
+def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
     backend = gbm.resolve(backend)
-    log(f"model backend: {backend}")
+    log(f"model backend: {backend}, {n_folds} folds, max rounds {max_rounds}")
     X = pd.read_parquet(feat_path(work_dir, "train"))
     s1_ids = load_prep(work_dir, "train", (1,), ["entity_id"])["entity_id"]
     o_ids = load_prep(work_dir, "train", (2, 3), ["entity_id"])["entity_id"]
     ex, gt, sizes = true_pairs(data_dir, s1_ids, o_ids)
-    key = X["s1"].values.astype(np.int64) * (1 << 32) + X["o"].values.astype(np.int64)
+    n_true = np.zeros(len(s1_ids), np.int64)
+    np.add.at(n_true, ex["s1"].dropna().astype(np.int64).to_numpy(), 1)
     e2 = ex.dropna(subset=["s1", "o"])
-    tkey = e2["s1"].astype(np.int64).values * (1 << 32) + e2["o"].astype(np.int64).values
-    X["label"] = np.isin(key, tkey).astype(np.int8)
-    fold_all, u_all = _fold(s1_ids)
-    X["fold"] = fold_all[X["s1"].values]
-    in_sample = u_all[X["s1"].values] < 2 * train_frac
+    tkey = e2["s1"].astype(np.int64).to_numpy() * (1 << 32) + e2["o"].astype(np.int64).to_numpy()
+    key = X["s1"].to_numpy().astype(np.int64) * (1 << 32) + X["o"].to_numpy().astype(np.int64)
+    y = np.isin(key, tkey).astype(np.int8)
+    del key, tkey
+    fold_all, u_all = _folds(s1_ids, n_folds)
+    s1 = X["s1"].to_numpy()
+    o = X["o"].to_numpy()
+    fold, u = fold_all[s1], u_all[s1]
     feats = feature_columns(X)
-    log(f"train pairs {len(X):,} (pos {X.label.sum():,}); features {len(feats)}; "
-        f"pair recall after pruning {X.label.sum() / len(ex):.4f}")
-
-    # ---- 2-fold OOF by S1 entity
-    X["p"] = np.nan
-    iters = []
-    for f in (0, 1):
-        tr = (X.fold.values == f) & in_sample
-        va_all = X.fold.values != f
-        es = va_all & (u_all[X["s1"].values] < 0.04)          # small early-stopping slice of the other fold
-        m = gbm.fit(backend, X.loc[tr, feats], X.label[tr].values, feats, max_rounds, seed=f,
-                    Xva=X.loc[es, feats], yva=X.label[es].values, log=log)
-        iters.append(m.best_iteration)
-        X.loc[va_all, "p"] = m.predict(X.loc[va_all, feats])
-        log(f"fold {f}: trained on {tr.sum():,} pairs, best_iter {m.best_iteration}")
+    log(f"train pairs {len(X):,} (pos {int(y.sum()):,}); features {len(feats)}; "
+        f"pair recall of scored pairs {y.sum() / len(ex):.4f}")
     from sklearn.metrics import average_precision_score, roc_auc_score
-    log(f"OOF pair AUC {roc_auc_score(X.label, X.p):.5f}  AP {average_precision_score(X.label, X.p):.5f}")
+    lab = y.astype(bool)
 
-    # ---- tune decision on a random subset of S1 (all S1, incl. singletons / no candidates)
-    truth = _truth_ints(ex, len(s1_ids))
-    rng = np.random.default_rng(0)
-    ids = rng.choice(len(s1_ids), size=min(tune_s1, len(s1_ids)), replace=False)
-    idset = set(ids.tolist())
-    # 1-to-1 must see ALL S1 competitors of each record -> keep every pair of records touching the subset
-    touch = X["o"][X["s1"].isin(idset)].unique()
-    P = X.loc[X["o"].isin(touch), ["s1", "o", "p"]]
-    params, score = tune_decision(P, truth, ids)
-    pred = apply_rule(P.rename(columns={"s1": "s1_id", "o": "cand_id"}), params)
-    bd = breakdown(pred, truth, ids)
-    sub = X.loc[X["s1"].isin(set(ids.tolist())), ["s1", "o"]].groupby("s1")["o"].apply(set).to_dict()
-    ceil = breakdown({i: [o for o in truth[i] if o in sub.get(i, ())] for i in ids}, truth, ids)
-    log(f"OOF macro F0.5 {score:.5f}  breakdown {bd}")
-    log(f"ceiling after pruning (perfect matcher on scored pairs): {ceil}")
+    # ---- level 1
+    p1, m1, it1 = _kfold(backend, X, y, feats, fold, u, n_folds, max_rounds, "L1")
+    t1, sc1 = tune_threshold(s1, o, p1, lab, n_true)
+    log(f"L1 OOF AUC {roc_auc_score(y, p1):.5f} AP {average_precision_score(y, p1):.5f}; "
+        f"macro F0.5 {sc1:.5f} @ t={t1}")
 
-    # ---- final model on the union of both training samples
-    n_rounds = int(np.mean(iters) * 1.15) + 1
-    m = gbm.fit(backend, X.loc[in_sample, feats], X.label[in_sample].values, feats, n_rounds, seed=7, log=log)
-    imp = m.importance()
+    # ---- level 2: level-1 OOF probabilities aggregated per record / per S1 entity + all features
+    A = agg_features(X, p1)
+    for c in AGG:
+        X[c] = A[c].to_numpy()
+    del A
+    feats2 = feats + AGG
+    p2, m2, it2 = _kfold(backend, X, y, feats2, fold, u, n_folds, max_rounds, "L2")
+    t2, sc2 = tune_threshold(s1, o, p2, lab, n_true)
+    log(f"L2 OOF AUC {roc_auc_score(y, p2):.5f} AP {average_precision_score(y, p2):.5f}; "
+        f"macro F0.5 {sc2:.5f} @ t={t2}")
+
+    use_l2 = sc2 >= sc1
+    p_fin, t_fin, sc = (p2, t2, sc2) if use_l2 else (p1, t1, sc1)
+    pred = one_to_one_best(s1, o, p_fin) & (p_fin >= t_fin)
+    bd = macro_f05(s1, pred, lab, n_true)
+    ceil = macro_f05(s1, lab, lab, n_true)
+    ck = load_prep(work_dir, "train", (1,), ["ckey"])["ckey"].to_numpy()
+    by_c = {c: macro_f05(s1, pred, lab, n_true, np.where(ck == c)[0])["macro"] for c in np.unique(ck)}
+    imp = m2[0].importance() if use_l2 else m1[0].importance()
     with open(os.path.join(work_dir, "model2.pkl"), "wb") as fh:
-        pickle.dump({"model": m, "feats": feats, "params": params}, fh)
-    rep = ["# Stage-2 report", "", f"- train pairs {len(X):,}, positives {int(X.label.sum()):,}",
-           f"- pair recall after pruning: {X.label.sum() / len(ex):.4f}",
-           f"- OOF pair AUC {roc_auc_score(X.label, X.p):.5f}, AP {average_precision_score(X.label, X.p):.5f}",
-           f"- model backend {backend}, best iterations {iters}, final rounds {n_rounds}",
-           f"- decision: {params}", f"- **OOF macro F0.5 {score:.5f}**; breakdown {bd}",
-           f"- ceiling after pruning: {ceil}", "", "## Top features (gain)", "",
+        pickle.dump({"l1": m1, "l2": m2 if use_l2 else None, "feats": feats, "feats2": feats2,
+                     "threshold": t_fin, "use_l2": use_l2}, fh)
+    rep = ["# Stage-2 report", "", f"- train pairs {len(X):,}, positives {int(y.sum()):,}",
+           f"- pair recall of scored pairs: {y.sum() / len(ex):.4f}",
+           f"- backend {backend}, {n_folds} folds; L1 best iterations {it1}; L2 best iterations {it2}",
+           f"- L1: AUC {roc_auc_score(y, p1):.5f}, macro F0.5 {sc1:.5f} @ t={t1}",
+           f"- L2: AUC {roc_auc_score(y, p2):.5f}, macro F0.5 {sc2:.5f} @ t={t2}",
+           f"- **used {'L2' if use_l2 else 'L1'}: OOF macro F0.5 {bd['macro']:.5f}** (all {len(s1_ids):,} train S1)",
+           f"- breakdown {bd}", f"- by country {by_c}",
+           f"- ceiling (perfect matcher on scored pairs) {ceil}", "", "## Top features (gain)", "",
            imp.head(40).round(0).to_string()]
     open(os.path.join(work_dir, "stage2_report.md"), "w").write("\n".join(rep) + "\n")
     log("\n".join(rep))
@@ -167,16 +247,29 @@ def train(data_dir, work_dir, train_frac=0.25, tune_s1=400_000, max_rounds=2000,
 def predict(work_dir, out_dir):
     b = pickle.load(open(os.path.join(work_dir, "model2.pkl"), "rb"))
     X = pd.read_parquet(feat_path(work_dir, "test"))
-    X["p"] = b["model"].predict(X)
-    s1_ids = load_prep(work_dir, "test", (1,), ["entity_id"])["entity_id"].values
-    o_ids = load_prep(work_dir, "test", (2, 3), ["entity_id"])["entity_id"].values
-    pred = apply_rule(X[["s1", "o", "p"]].rename(columns={"s1": "s1_id", "o": "cand_id"}), b["params"])
+    p = np.mean([m.predict(X[b["feats"]]) for m in b["l1"]], axis=0)     # same distribution as OOF
+    log(f"L1 test scores from {len(b['l1'])} fold models")
+    if b["use_l2"]:
+        A = agg_features(X, p)
+        for c in AGG:
+            X[c] = A[c].to_numpy()
+        p = np.mean([m.predict(X[b["feats2"]]) for m in b["l2"]], axis=0)
+        log(f"L2 test scores from {len(b['l2'])} fold models")
+    s1, o = X["s1"].to_numpy(), X["o"].to_numpy()
+    keep = one_to_one_best(s1, o, p) & (p >= b["threshold"])
+    s1_ids = load_prep(work_dir, "test", (1,), ["entity_id"])["entity_id"].to_numpy()
+    o_ids = load_prep(work_dir, "test", (2, 3), ["entity_id"])["entity_id"].to_numpy()
     os.makedirs(out_dir, exist_ok=True)
-    cand = X.groupby("s1")["o"].apply(list).to_dict()
+    cand = pd.Series(o_ids[o]).groupby(s1).apply(list).to_dict()
+    match = pd.Series(o_ids[o[keep]]).groupby(s1[keep]).apply(list).to_dict()
     write_id_lists(os.path.join(out_dir, "candidate_pairs.tsv"), s1_ids,
-                   {s1_ids[k]: [o_ids[o] for o in v] for k, v in cand.items()}, "candidate_entity_ids")
+                   {s1_ids[k]: v for k, v in cand.items()}, "candidate_entity_ids")
     write_id_lists(os.path.join(out_dir, "matching_results.tsv"), s1_ids,
-                   {s1_ids[k]: [o_ids[o] for o in v] for k, v in pred.items()}, "matched_entity_ids")
-    n = sum(len(v) for v in pred.values())
-    log(f"wrote {out_dir}: {len(s1_ids):,} S1 rows, {n:,} matches "
-        f"({n / len(s1_ids):.2f}/S1), candidates {len(X):,}")
+                   {s1_ids[k]: v for k, v in match.items()}, "matched_entity_ids")
+    ck = load_prep(work_dir, "test", (1,), ["ckey"])["ckey"].to_numpy()
+    nm = np.bincount(s1[keep], minlength=len(s1_ids))
+    for c in np.unique(ck):
+        sel = ck == c
+        log(f"  test {c}: {sel.sum():,} S1, mean matches {nm[sel].mean():.2f}, empty {np.mean(nm[sel] == 0):.2%}")
+    log(f"wrote {out_dir}: {len(s1_ids):,} S1 rows, {int(keep.sum()):,} matches "
+        f"({keep.sum() / len(s1_ids):.2f}/S1), candidates {len(X):,}")
