@@ -54,6 +54,23 @@ open the folder in VS Code, select the `.venv` interpreter, and run `python run.
 In VS Code the same commands are under **Terminal → Run Task → "ER: …"**. The debug configs
 (F5) run the pipeline on `dataset_sample/` so you can set breakpoints in the features.
 
+## Large-scale pipeline (v2, built from the EDA)
+
+Data: train 2.2M S1 x 10.3M S2+S3, test 1.7M x 10M. GT is strictly 1-to-1 from the S2/S3 side,
+country is a safe block key, addresses are the reliable signal, and distractors are near-duplicates.
+
+| step | module | what |
+|---|---|---|
+| synonyms | `synonyms.py` | learn token maps from training pairs (Indic-script names/states, city aliases) |
+| prep | `prep.py` | stream + normalise every file once (parallel) -> `work/prep/*.parquet` |
+| block | `block.py` | IDF-weighted token-overlap search per country, reverse (S2/S3->S1) + forward -> `work/cands/`, `work/blocking_report.md` |
+| features2 | `features2.py` | ~120 pair + competition features on the pruned pairs -> `work/feat/` |
+| train2 | `stage2.py` | LightGBM, 2-fold OOF by S1 entity, 1-to-1 decision tuned for macro F0.5 -> `work/stage2_report.md` |
+| predict2 | `stage2.py` | `output/matching_results.tsv`, `output/candidate_pairs.tsv` |
+
+`python run.py full` runs everything, and `stage1` / `stage2` run the halves. On the full data,
+run it on Modal (32 CPU / 128 GB).
+
 ## 3. Heavy runs on Modal (recommended: more cores, can run detached)
 
 ```bash

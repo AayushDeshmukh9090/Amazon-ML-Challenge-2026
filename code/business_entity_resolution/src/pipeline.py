@@ -202,9 +202,41 @@ def cmd_features(args):
         build_split(args.data_dir, split, BlockConfig(), args.work_dir, use_cache=not args.no_cache)
 
 
+def cmd_synonyms(args):
+    from synonyms import learn
+    learn(args.data_dir, args.work_dir, n_pairs=args.syn_pairs)
+
+
+def cmd_prep(args):
+    from prep import prep_all
+    prep_all(args.data_dir, args.work_dir, jobs=args.jobs, force=args.force)
+
+
+def cmd_block(args):
+    from block import block_split, recall_report
+    for split in args.splits.split(","):
+        s1, oth, cands = block_split(args.work_dir, split, args.k_rev, args.k_fwd, args.df_cap, args.jobs)
+        if split == "train":
+            recall_report(args.data_dir, args.work_dir, s1, oth, cands, args.k_rev, args.k_fwd)
+
+
+def cmd_stage2(args, which=("features2", "train2", "predict2")):
+    import stage2
+    if "features2" in which:
+        R, F = stage2.choose_RF(args.work_dir, args.R, args.F)
+        for split in args.splits.split(","):
+            stage2.features(args.work_dir, split, R, F, args.jobs, force=args.force)
+    if "train2" in which:
+        stage2.train(args.data_dir, args.work_dir, train_frac=args.train_frac, max_rounds=args.max_rounds)
+    if "predict2" in which:
+        stage2.predict(args.work_dir, args.out_dir)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["blocking", "features", "train", "predict", "all"])
+    ap.add_argument("cmd", choices=["synonyms", "prep", "block", "stage1", "features2", "train2", "predict2",
+                                    "stage2", "full",
+                                    "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
     ap.add_argument("--work-dir", default="work")
     ap.add_argument("--out-dir", default="output")
@@ -212,7 +244,38 @@ def main():
     ap.add_argument("--skip-loco", action="store_true")
     ap.add_argument("--no-cache", action="store_true", help="ignore cached features in work-dir")
     ap.add_argument("--with-test", action="store_true", help="blocking: also run on test (no recall)")
+    # large-scale stages (v2)
+    ap.add_argument("--jobs", type=int, default=None, help="worker processes (default: all cores)")
+    ap.add_argument("--force", action="store_true", help="prep: rebuild even if up to date")
+    ap.add_argument("--syn-pairs", type=int, default=800_000)
+    ap.add_argument("--splits", default="train,test")
+    ap.add_argument("--k-rev", type=int, default=10)
+    ap.add_argument("--k-fwd", type=int, default=20)
+    ap.add_argument("--df-cap", type=int, default=3000)
+    ap.add_argument("--R", type=int, default=None, help="prune: keep r_rev <= R (default: auto)")
+    ap.add_argument("--F", type=int, default=None, help="prune: keep r_fwd <= F (default: auto)")
+    ap.add_argument("--train-frac", type=float, default=0.25, help="share of S1 entities used per fold model")
+    ap.add_argument("--max-rounds", type=int, default=2000)
     args = ap.parse_args()
+    if args.cmd in ("features2", "train2", "predict2"):
+        return cmd_stage2(args, (args.cmd,))
+    if args.cmd == "stage2":
+        return cmd_stage2(args)
+    if args.cmd == "full":  # the whole large-scale pipeline
+        cmd_synonyms(args)
+        cmd_prep(args)
+        cmd_block(args)
+        return cmd_stage2(args)
+    if args.cmd == "synonyms":
+        return cmd_synonyms(args)
+    if args.cmd == "prep":
+        return cmd_prep(args)
+    if args.cmd == "block":
+        return cmd_block(args)
+    if args.cmd == "stage1":  # synonyms -> prep -> block in one go
+        cmd_synonyms(args)
+        cmd_prep(args)
+        return cmd_block(args)
     if args.cmd == "blocking":
         return cmd_blocking(args)
     if args.cmd == "features":

@@ -7,3 +7,4 @@ Unidecode==1.4.0
 matplotlib==3.11.2
 tabulate==0.10.0
 scipy==1.17.1
+pyarrow==25.0.1

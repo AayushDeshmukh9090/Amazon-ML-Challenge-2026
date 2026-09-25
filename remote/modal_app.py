@@ -6,8 +6,8 @@ One-time setup (on your laptop):
 
 Every run is launched from the repo root:
     modal run remote/modal_app.py --upload        # first time / when dataset changes: push dataset/ to a Modal Volume
-    modal run remote/modal_app.py                 # train + predict (default task "all"), then download results
-    modal run remote/modal_app.py --task eda      # any run.py task: eda | blocking | features | train | predict | all
+    modal run remote/modal_app.py                 # full large-scale pipeline (default task "full"), then download results
+    modal run remote/modal_app.py --task eda      # any task: eda | stage1 | synonyms | prep | block | ...
     modal run remote/modal_app.py --task train --extra "--folds 5 --skip-loco"
     modal run --detach remote/modal_app.py        # keeps running if your laptop sleeps / disconnects;
                                                   # afterwards fetch results with:  --task download
@@ -28,8 +28,8 @@ import modal
 
 APP_NAME = "amazon-ml-2026-er"
 VOL_NAME = "amazon-ml-2026"
-CPU = 16            # cores: LightGBM, rapidfuzz cpdist and TF-IDF all use them
-MEMORY_MB = 65536   # 64 GB, enough for millions of candidate pairs x ~90 features
+CPU = 32            # cores: prep / blocking / features run in process pools
+MEMORY_MB = 131072  # 128 GB: ~12M-record token matrices + ~100M candidate pairs
 TIMEOUT_S = 6 * 3600
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -54,6 +54,10 @@ DOWNLOADS = [
     ("work/model.pkl", "work/model.pkl"),
     ("work/oof_pairs.tsv", "work/oof_pairs.tsv"),
     ("work/test_pairs_scored.tsv", "work/test_pairs_scored.tsv"),
+    ("work/blocking_report.md", "work/blocking_report.md"),
+    ("work/blocking_grid.json", "work/blocking_grid.json"),
+    ("work/synonyms.json", "work/synonyms.json"),
+    ("work/stage2_report.md", "work/stage2_report.md"),
     ("logs/last_run.log", "work/modal_last_run.log"),
 ]
 
@@ -112,7 +116,7 @@ def _download(task: str):
 
 
 @app.local_entrypoint()
-def main(task: str = "all", extra: str = "", upload: bool = False, download: bool = True):
+def main(task: str = "full", extra: str = "", upload: bool = False, download: bool = True):
     if upload:
         _upload_dataset()
         if task == "upload":

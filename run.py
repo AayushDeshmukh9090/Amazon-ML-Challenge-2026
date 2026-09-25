@@ -9,15 +9,15 @@ LOCAL / cheap (seconds - few minutes on a laptop):
   eda          EDA report -> reports/eda/eda_report.md
   blocking     candidate generation + recall report only (no model)
   smoke        synthetic data -> full train+predict in a temp folder (checks the code runs)
-  quick        full pipeline on dataset_sample/ (fast iteration on real-looking data)
+  quick        full v2 pipeline on dataset_sample/ (real data, 10% of S1) -> work_sample/
   validate     check output/ (official validator if present in utils/, else ours)
   zip          build <team>_submission.zip   (python run.py zip --team NAME)
 
-HEAVY (full data - prefer Modal / Colab, see remote/):
-  features     build + cache pair features for train and test into work/
-  train        5-fold OOF + decision tuning + LOCO + final models  -> work/
-  predict      score test -> output/matching_results.tsv + candidate_pairs.tsv
-  all          train + predict
+HEAVY (full data - run on Modal: `modal run remote/modal_app.py`, see README):
+  full         synonyms -> prep -> block -> features2 -> train2 -> predict2  (everything)
+  stage1       synonyms -> prep -> block   (writes work/blocking_report.md)
+  stage2       features2 -> train2 -> predict2  (writes work/stage2_report.md, output/)
+  synonyms | prep | block | features2 | train2 | predict2   individual steps
 """
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ def main():
         tmp = tempfile.mkdtemp(prefix="er_smoke_")
         sh(PY, "utils/make_synthetic_data.py", "--out", os.path.join(tmp, "data"), "--n-train", "800",
            "--n-test", "500")
-        pipeline("all", os.path.join(tmp, "data"), ["--folds", "3", "--skip-loco", *rest],
+        pipeline("full", os.path.join(tmp, "data"), ["--max-rounds", "200", *rest],
                  work=os.path.join(tmp, "work"), out=os.path.join(tmp, "out"))
         sh(PY, "utils/check_submission.py", "--out-dir", os.path.join(tmp, "out"),
            "--test-dir", os.path.join(tmp, "data", "test"))
@@ -123,8 +123,11 @@ def main():
     elif task == "quick":
         if not os.path.isdir(os.path.join(ROOT, "dataset_sample")):
             sh(PY, "utils/make_sample.py", "--src", "dataset", "--dst", "dataset_sample")
-        pipeline("all", "dataset_sample", ["--folds", "3", *rest], work="work_sample", out="output_sample")
-    elif task in ("features", "train", "predict", "all"):
+        pipeline("full", "dataset_sample", rest, work="work_sample", out="output_sample")
+    elif task in ("full", "stage1", "stage2", "synonyms", "prep", "block", "features2", "train2", "predict2"):
+        check_data(data)
+        pipeline(task, data, rest)
+    elif task in ("features", "train", "predict", "all"):  # v1 small-data pipeline (kept for reference)
         check_data(data)
         pipeline(task, data, rest)
     elif task == "validate":

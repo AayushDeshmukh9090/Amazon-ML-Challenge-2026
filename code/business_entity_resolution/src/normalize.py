@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
+import json
+import os
 
 from unidecode import unidecode
 
@@ -97,65 +99,149 @@ STATE_CANON = {
     "bihar": "br", "br": "br", "odisha": "od", "orissa": "od", "od": "od",
 }
 
+# US states: full name -> USPS code (applied to addresses; only full names are mapped, so
+# 2-letter codes are never re-interpreted inside non-US text)
+US_STATES = {
+    "alabama": "al", "alaska": "ak", "arizona": "az", "arkansas": "ar", "california": "ca", "colorado": "co",
+    "connecticut": "ct", "delaware": "de", "florida": "fl", "georgia": "ga", "hawaii": "hi", "idaho": "id",
+    "illinois": "il", "indiana": "in", "iowa": "ia", "kansas": "ks", "kentucky": "ky", "louisiana": "la",
+    "maine": "me", "maryland": "md", "massachusetts": "ma", "michigan": "mi", "minnesota": "mn",
+    "mississippi": "ms", "missouri": "mo", "montana": "mt", "nebraska": "ne", "nevada": "nv",
+    "new hampshire": "nh", "new jersey": "nj", "new mexico": "nm", "new york": "ny", "north carolina": "nc",
+    "north dakota": "nd", "ohio": "oh", "oklahoma": "ok", "oregon": "or", "pennsylvania": "pa",
+    "rhode island": "ri", "south carolina": "sc", "south dakota": "sd", "tennessee": "tn", "texas": "tx",
+    "utah": "ut", "vermont": "vt", "virginia": "va", "washington": "wa", "west virginia": "wv",
+    "wisconsin": "wi", "wyoming": "wy", "district of columbia": "dc",
+}
+# "washington"/"virginia" also occur as street / city names: only map them when they are the
+# LAST address component (see _map_states)
+_STATE_TAIL_ONLY = {"washington", "virginia"}
+_MULTI_STATES = sorted([k for k in list(US_STATES) + list(STATE_CANON) if " " in k], key=len, reverse=True)
+_MULTI_RE = re.compile(r"\b(" + "|".join(map(re.escape, _MULTI_STATES)) + r")\b")
+
+# Learned token synonyms (see synonyms.py): transliterated-script / alias token -> canonical
+# token, mined from TRAINING matched pairs only.  Loaded once per process.
+SYN_NAME: dict[str, str] = {}
+SYN_ADDR: dict[str, str] = {}
+
+
+def set_synonyms(name_map: dict | None = None, addr_map: dict | None = None):
+    global SYN_NAME, SYN_ADDR
+    SYN_NAME, SYN_ADDR = dict(name_map or {}), dict(addr_map or {})
+    for f in (norm_name, core_name, norm_addr):
+        f.cache_clear()
+
+
+def load_synonyms(path: str | None) -> bool:
+    if path and os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+        set_synonyms(d.get("name"), d.get("addr"))
+        return True
+    return False
+
+
 _AMP = re.compile(r"\s*&\s*|\s+\+\s+")
-_DBA = re.compile(r"\b(?:d\s*/\s*b\s*/\s*a|dba|d\.b\.a\.?|t\s*/\s*a|trading as|doing business as|aka|a\.k\.a\.?)\b",
-                  re.I)
+_DBA = re.compile(r"\b(?:d\s*/\s*b\s*/\s*a|dba|d\.b\.a\.?|t\s*/\s*a|trading as|doing business as|aka|a\.k\.a\.?|"
+                  r"f\s*/\s*k\s*/\s*a|fka|formerly known as|formerly)\b\s*:?", re.I)
+_DOMAIN = re.compile(r"(?:https?://)?(?:www\.)?([a-z0-9][a-z0-9-]*)\.(?:com|net|org|in|co\.in|fr|biz|us|info)\b",
+                     re.I)
+_NULLS = re.compile(r"<\s*null\s*>|\bnull\b|\bnone\b|\bn/?a\b|\bnil\b", re.I)
 _NON_ALNUM = re.compile(r"[^a-z0-9 ]+")
 _WS = re.compile(r"\s+")
 _DIGITS = re.compile(r"\d+")
-_ORD = re.compile(r"\b(\d+)(?:st|nd|rd|th|er|e|eme|ème)\b")
-_US_ZIP = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
-_IN_PIN = re.compile(r"\b(\d{3})\s?(\d{3})\b")
+_ORD = re.compile(r"\b(\d+)(?:st|nd|rd|th|er|e|eme)\b")
+_LEET = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "8": "b"})
+_NAME_NOISE = {"m", "s", "ms", "mr", "mrs", "id", "www", "com", "the",   # "M/s", "Mr", "(ID: x.com 123)"
+               "dba", "formerly", "fka", "aka", "known", "as"}
+_COUNTRY_WORDS = {"india", "france", "usa", "us", "america", "bharat"}
 
 
 def basic_clean(s) -> str:
-    """lowercase, strip accents/transliterate to ASCII, map & -> and, drop punctuation."""
+    """lowercase, transliterate to ASCII, & -> and, drop punctuation, strip ordinal suffixes."""
     if s is None or (isinstance(s, float) and s != s):
         return ""
     s = unidecode(str(s)).lower()
     s = _AMP.sub(" and ", s)
     s = s.replace("'", "").replace("`", "")
-    # keep dots inside abbreviations together: "p.v.t." -> "pvt"
-    s = re.sub(r"\b((?:[a-z]\.){2,})", lambda m: m.group(1).replace(".", ""), s)
+    s = re.sub(r"\b((?:[a-z]\.){2,})", lambda m: m.group(1).replace(".", ""), s)   # p.v.t. -> pvt
     s = _NON_ALNUM.sub(" ", s)
     s = _ORD.sub(r"\1", s)
     return _WS.sub(" ", s).strip()
+
+
+def _fix_leet(tok: str) -> str:
+    """'8rothers' -> 'brothers', 'c0mite' -> 'comite': single digit inside a mostly-letter token."""
+    if len(tok) >= 4 and sum(c.isdigit() for c in tok) == 1 and sum(c.isalpha() for c in tok) >= 3:
+        return tok.translate(_LEET)
+    return tok
+
+
+def _syn(toks, table):
+    return [table.get(t, t) for t in toks] if table else toks
 
 
 def _canon_tokens(tokens, table):
     return [table.get(t, t) for t in tokens]
 
 
-@lru_cache(maxsize=None)
+def _name_tokens(name: str) -> list[str]:
+    if not isinstance(name, str):
+        return []
+    s = _DOMAIN.sub(lambda m: " " + m.group(1) + " ", name)          # bydynamic.com -> bydynamic
+    toks = [_fix_leet(t) for t in basic_clean(s).split()]
+    return _canon_tokens(_syn(toks, SYN_NAME), LEGAL_CANON)
+
+
+@lru_cache(maxsize=1 << 16)
 def norm_name(name: str) -> str:
-    toks = basic_clean(name).split()
-    return " ".join(_canon_tokens(toks, LEGAL_CANON))
+    return " ".join(_name_tokens(name))
 
 
-@lru_cache(maxsize=None)
+def _is_legal(t: str) -> bool:
+    # exact legal token, or a transliterated / misspelt long legal word ('limittedd', 'praaivett')
+    return t in LEGAL_FORMS or (len(t) >= 5 and _skel_tok(t) in _LEGAL_SKELS)
+
+
+@lru_cache(maxsize=1 << 16)
 def core_name(name: str) -> str:
-    """Name with legal forms / stop words removed (falls back to norm name)."""
-    toks = norm_name(name).split()
-    core = [t for t in toks if t not in LEGAL_FORMS]
+    """Name without legal forms, stop words, 'M/s', '(India)', domain residue. Falls back to norm_name."""
+    toks = _name_tokens(name)
+    core = [t for t in toks if not _is_legal(t) and t not in _NAME_NOISE and t not in _COUNTRY_WORDS
+            and not t.isdigit()]
     return " ".join(core) if core else " ".join(toks)
 
 
 def split_dba(name: str) -> list[str]:
-    """Return [full, legal part, trade part] when a DBA marker is present."""
+    """[full, part1, part2] when a DBA / formerly / fka marker is present, else [full]."""
     if not isinstance(name, str):
         return [""]
-    parts = [p.strip(" ,;-()") for p in _DBA.split(name) if p and p.strip(" ,;-()")]
+    parts = [p.strip(" ,;:-()|") for p in _DBA.split(name) if p and p.strip(" ,;:-()|")]
+    if "|" in name:  # "mv trace private limited | www.mvtracep.com"
+        parts += [p.strip() for p in name.split("|") if p.strip()]
     return [name] + parts if len(parts) > 1 else [name]
 
 
-@lru_cache(maxsize=None)
-def norm_addr(addr: str) -> str:
-    s = basic_clean(addr)
-    for full, ab in STATE_CANON.items():
-        if " " in full:
-            s = s.replace(full, ab)
+def _map_states(s: str) -> str:
+    s = _MULTI_RE.sub(lambda m: US_STATES.get(m.group(1)) or STATE_CANON.get(m.group(1)), s)
     toks = s.split()
-    return " ".join(_canon_tokens(toks, ADDR_CANON))
+    out = []
+    for i, t in enumerate(toks):
+        if t in US_STATES and (t not in _STATE_TAIL_ONLY or i == len(toks) - 1):
+            out.append(US_STATES[t])
+        else:
+            out.append(STATE_CANON.get(t, t) if len(t) > 3 else t)
+    return " ".join(out)
+
+
+@lru_cache(maxsize=1 << 16)
+def norm_addr(addr: str) -> str:
+    if not isinstance(addr, str):
+        return ""
+    s = basic_clean(_NULLS.sub(" ", addr))
+    s = " ".join(_syn(s.split(), SYN_ADDR))
+    s = _map_states(s)
+    return " ".join(_canon_tokens(s.split(), ADDR_CANON))
 
 
 def acronym(name: str) -> str:
@@ -163,44 +249,74 @@ def acronym(name: str) -> str:
     return "".join(t[0] for t in toks if t and not t.isdigit())
 
 
-@lru_cache(maxsize=None)
-def phonetic_key(s: str) -> str:
-    """Crude transliteration-robust skeleton (Hindi/English/French spellings).
-
-    sharma/sharmaa/shurma -> srm ; ph/f, v/w, z/j, k/c/q, ee/i, oo/u collapse.
-    """
-    s = basic_clean(s)
+def _skel_tok(tok: str) -> str:
+    if tok.isdigit():
+        return tok
     for a, b in (("ph", "f"), ("sh", "s"), ("ch", "c"), ("kh", "k"), ("gh", "g"), ("th", "t"),
                  ("dh", "d"), ("bh", "b"), ("jh", "j"), ("ck", "k"), ("q", "k"), ("c", "k"),
                  ("w", "v"), ("z", "j"), ("x", "ks"), ("y", "i")):
-        s = s.replace(a, b)
-    out = []
-    for tok in s.split():
-        if tok.isdigit():
-            out.append(tok)
-            continue
-        first = tok[0]
-        rest = re.sub(r"[aeiouh]", "", tok[1:])
-        rest = re.sub(r"(.)\1+", r"\1", rest)
-        out.append(first + rest)
-    return " ".join(out)
+        tok = tok.replace(a, b)
+    rest = re.sub(r"[aeiouh]", "", tok[1:])
+    return tok[0] + re.sub(r"(.)\1+", r"\1", rest)
+
+
+def phonetic_key(s: str) -> str:
+    """Transliteration/typo-robust skeleton: sharma/shurma -> srm, limittedd/limited -> lmtd."""
+    return " ".join(_skel_tok(t) for t in basic_clean(s).split())
 
 
 def numbers(s: str) -> set[str]:
-    return set(_DIGITS.findall(basic_clean(s)))
+    """Digit runs with leading zeros stripped ('0094' -> '94', '3503-3507' -> {3503, 3507})."""
+    if not isinstance(s, str):
+        return set()
+    return {d.lstrip("0") or "0" for d in _DIGITS.findall(unidecode(s))}
+
+
+def house_number(addr: str) -> str:
+    """First number of the address that is not a postal code (leading zeros stripped)."""
+    if not isinstance(addr, str):
+        return ""
+    for d in _DIGITS.findall(unidecode(_NULLS.sub(" ", addr))):
+        if len(d) <= 5 or len(d.lstrip("0")) <= 5:
+            return d.lstrip("0") or "0"
+    return ""
 
 
 def postal_code(addr: str) -> str:
-    """Best-effort postal code: US ZIP5, India PIN6, France CP5.  '' if absent."""
+    """Best-effort postal code: India PIN6, US ZIP5 / France CP5 (last 5-digit number). '' if absent."""
     if not isinstance(addr, str):
         return ""
     a = unidecode(addr)
     m = re.search(r"\b(\d{6})\b", a)
     if m:
         return m.group(1)
-    m = re.search(r"\b(\d{3})\s(\d{3})\b", a)  # "400 001"
+    m = re.search(r"\b(\d{3})\s(\d{3})\b", a)
     if m:
         return m.group(1) + m.group(2)
-    # 5-digit: take the LAST 5-digit number (house numbers usually come first)
     ms = re.findall(r"\b(\d{5})(?:-\d{4})?\b", a)
-    return ms[-1] if ms else ""
+    return ms[-1] if len(ms) >= 1 and len(re.findall(r"\d+", a)) > 1 else ""
+
+
+def block_tokens(name: str, addr: str) -> list[str]:
+    """Tokens for the inverted-index blocker: name skeletons, no-space core name, address
+    skeletons, and normalised numbers - each namespaced so they never collide."""
+    cn = core_name(name)
+    nsk = [_skel_tok(t) for t in cn.split() if len(t) > 1]
+    toks = {"n:" + t for t in nsk}
+    toks.update("nb:" + a + "_" + b for a, b in zip(nsk, nsk[1:]))          # name bigrams
+    ns = cn.replace(" ", "")
+    if len(ns) >= 4:
+        toks.add("ns:" + ns)                                                # 'vangregionalfinance'
+    ask = []
+    for t in norm_addr(addr).split():
+        if t.isdigit():
+            ask.append("#" + (t.lstrip("0") or "0"))
+        elif len(t) > 1:
+            ask.append(_skel_tok(t))
+    toks.update(("#:" + t[1:]) if t[0] == "#" else ("a:" + t) for t in ask)
+    toks.update("ab:" + a + "_" + b for a, b in zip(ask, ask[1:]))          # '1020_fldng', 'fldng_ln'
+    return sorted(toks)
+
+
+_LEGAL_SKELS = {_skel_tok(w) for w in ("private", "limited", "corporation", "incorporated", "company",
+                                       "societe", "compagnie", "etablissements")}
