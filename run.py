@@ -134,7 +134,7 @@ def main():
         official = os.path.join(ROOT, "utils", "validate_submission.py")
         if os.path.exists(official):
             sh(PY, official, "--matching", "output/matching_results.tsv",
-               "--candidate", "output/candidate_pairs.tsv", "--test-dir", f"{data}/test")
+               "--candidate", "output/candidate_pairs.tsv", "--test-dir", f"{data}/test", *rest)
         else:
             print("(official utils/validate_submission.py not found - using utils/check_submission.py)")
             sh(PY, "utils/check_submission.py", "--out-dir", "output", "--test-dir", f"{data}/test")
