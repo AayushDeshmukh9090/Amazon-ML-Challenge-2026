@@ -9,6 +9,7 @@ Every run is launched from the repo root:
     modal run remote/modal_app.py                 # full large-scale pipeline (default task "full"), then download results
     modal run remote/modal_app.py --task eda      # any task: eda | stage1 | synonyms | prep | block | ...
     modal run remote/modal_app.py --task train --extra "--folds 5 --skip-loco"
+    modal run remote/modal_app.py --gpu no        # force CPU only (default: GPU for full/stage2/train2/predict2)
     modal run --detach remote/modal_app.py        # keeps running if your laptop sleeps / disconnects;
                                                   # afterwards fetch results with:  --task download
 
@@ -31,6 +32,8 @@ VOL_NAME = "amazon-ml-2026"
 CPU = 32            # cores: prep / blocking / features run in process pools
 MEMORY_MB = 131072  # 128 GB: ~12M-record token matrices + ~100M candidate pairs
 TIMEOUT_S = 6 * 3600
+GPU = "L4"          # 24 GB NVIDIA GPU for XGBoost training/prediction (tasks in GPU_TASKS)
+GPU_TASKS = {"full", "stage2", "train2", "predict2"}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -62,8 +65,7 @@ DOWNLOADS = [
 ]
 
 
-@app.function(image=image, volumes={"/vol": vol}, cpu=CPU, memory=MEMORY_MB, timeout=TIMEOUT_S)
-def run_remote(task: str, extra: str = "") -> int:
+def _run(task: str, extra: str = "") -> int:
     vol.reload()
     os.makedirs("/vol/logs", exist_ok=True)
     if task == "eda":
@@ -81,6 +83,17 @@ def run_remote(task: str, extra: str = "") -> int:
         rc = p.wait()
     vol.commit()
     return rc
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=CPU, memory=MEMORY_MB, timeout=TIMEOUT_S)
+def run_remote(task: str, extra: str = "") -> int:
+    return _run(task, extra)
+
+
+# Same container size plus a GPU: string stages still use the 32 cores, model training uses the GPU
+@app.function(image=image, volumes={"/vol": vol}, cpu=CPU, memory=MEMORY_MB, gpu=GPU, timeout=TIMEOUT_S)
+def run_remote_gpu(task: str, extra: str = "") -> int:
+    return _run(task, extra)
 
 
 def _upload_dataset():
@@ -116,13 +129,15 @@ def _download(task: str):
 
 
 @app.local_entrypoint()
-def main(task: str = "full", extra: str = "", upload: bool = False, download: bool = True):
+def main(task: str = "full", extra: str = "", upload: bool = False, download: bool = True, gpu: str = "auto"):
     if upload:
         _upload_dataset()
         if task == "upload":
             return
     if task != "download":
-        rc = run_remote.remote(task, extra)
+        use_gpu = gpu == "yes" or (gpu == "auto" and task in GPU_TASKS)
+        print(f"running '{task}' on {'CPU + ' + GPU + ' GPU' if use_gpu else 'CPU'}")
+        rc = (run_remote_gpu if use_gpu else run_remote).remote(task, extra)
         if rc:
             print(f"remote task failed (exit {rc}); log copied to work/modal_last_run.log")
     if download:

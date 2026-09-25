@@ -231,7 +231,8 @@ def cmd_stage2(args, which=("prefilter", "features2", "train2", "predict2")):
         for split in args.splits.split(","):
             stage2.features(args.work_dir, split, R, F, args.jobs, force=args.force)
     if "train2" in which:
-        stage2.train(args.data_dir, args.work_dir, train_frac=args.train_frac, max_rounds=args.max_rounds)
+        stage2.train(args.data_dir, args.work_dir, train_frac=args.train_frac, max_rounds=args.max_rounds,
+                     backend=args.gbm)
     if "predict2" in which:
         stage2.predict(args.work_dir, args.out_dir)
 
@@ -262,6 +263,8 @@ def main():
     ap.add_argument("--F", type=int, default=None, help="prune: keep r_fwd <= F (default: auto)")
     ap.add_argument("--train-frac", type=float, default=0.25, help="share of S1 entities used per fold model")
     ap.add_argument("--max-rounds", type=int, default=2000)
+    ap.add_argument("--gbm", default="auto", choices=["auto", "xgb", "lgb"],
+                    help="auto = XGBoost on GPU if one is present, else LightGBM on CPU")
     ap.add_argument("--budget", type=float, default=4.0, help="prefilter: kept pairs per S2/S3 record")
     args = ap.parse_args()
     if args.cmd in ("prefilter", "features2", "train2", "predict2"):

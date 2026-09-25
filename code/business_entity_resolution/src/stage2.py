@@ -18,10 +18,10 @@ import os
 import pickle
 import time
 
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
+import gbm
 from block import true_pairs
 from decide import apply_rule
 from features2 import PREP_COLS, build, feature_columns
@@ -30,11 +30,6 @@ from metrics import breakdown
 from prep import load_prep
 
 T0 = time.time()
-LGB = dict(objective="binary", learning_rate=0.05, num_leaves=127, min_child_samples=100,
-           feature_fraction=0.7, bagging_fraction=0.7, bagging_freq=1, lambda_l2=10.0, max_bin=255,
-           verbose=-1, num_threads=0)
-
-
 def log(m):
     print(f"[{time.time() - T0:7.1f}s] {m}", flush=True)
 
@@ -103,7 +98,9 @@ def tune_decision(P: pd.DataFrame, truth: dict, ids, log=log):
     return res[0][1], res[0][0]
 
 
-def train(data_dir, work_dir, train_frac=0.25, tune_s1=400_000, max_rounds=2000):
+def train(data_dir, work_dir, train_frac=0.25, tune_s1=400_000, max_rounds=2000, backend="auto"):
+    backend = gbm.resolve(backend)
+    log(f"model backend: {backend}")
     X = pd.read_parquet(feat_path(work_dir, "train"))
     s1_ids = load_prep(work_dir, "train", (1,), ["entity_id"])["entity_id"]
     o_ids = load_prep(work_dir, "train", (2, 3), ["entity_id"])["entity_id"]
@@ -126,12 +123,10 @@ def train(data_dir, work_dir, train_frac=0.25, tune_s1=400_000, max_rounds=2000)
         tr = (X.fold.values == f) & in_sample
         va_all = X.fold.values != f
         es = va_all & (u_all[X["s1"].values] < 0.04)          # small early-stopping slice of the other fold
-        dtr = lgb.Dataset(X.loc[tr, feats], X.label[tr], free_raw_data=True)
-        dva = lgb.Dataset(X.loc[es, feats], X.label[es], reference=dtr)
-        m = lgb.train({**LGB, "seed": f}, dtr, max_rounds, valid_sets=[dva],
-                      callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(200)])
+        m = gbm.fit(backend, X.loc[tr, feats], X.label[tr].values, feats, max_rounds, seed=f,
+                    Xva=X.loc[es, feats], yva=X.label[es].values, log=log)
         iters.append(m.best_iteration)
-        X.loc[va_all, "p"] = m.predict(X.loc[va_all, feats], num_iteration=m.best_iteration)
+        X.loc[va_all, "p"] = m.predict(X.loc[va_all, feats])
         log(f"fold {f}: trained on {tr.sum():,} pairs, best_iter {m.best_iteration}")
     from sklearn.metrics import average_precision_score, roc_auc_score
     log(f"OOF pair AUC {roc_auc_score(X.label, X.p):.5f}  AP {average_precision_score(X.label, X.p):.5f}")
@@ -154,14 +149,14 @@ def train(data_dir, work_dir, train_frac=0.25, tune_s1=400_000, max_rounds=2000)
 
     # ---- final model on the union of both training samples
     n_rounds = int(np.mean(iters) * 1.15) + 1
-    m = lgb.train({**LGB, "seed": 7}, lgb.Dataset(X.loc[in_sample, feats], X.label[in_sample]), n_rounds)
-    imp = pd.Series(m.feature_importance("gain"), index=feats).sort_values(ascending=False)
+    m = gbm.fit(backend, X.loc[in_sample, feats], X.label[in_sample].values, feats, n_rounds, seed=7, log=log)
+    imp = m.importance()
     with open(os.path.join(work_dir, "model2.pkl"), "wb") as fh:
         pickle.dump({"model": m, "feats": feats, "params": params}, fh)
     rep = ["# Stage-2 report", "", f"- train pairs {len(X):,}, positives {int(X.label.sum()):,}",
            f"- pair recall after pruning: {X.label.sum() / len(ex):.4f}",
            f"- OOF pair AUC {roc_auc_score(X.label, X.p):.5f}, AP {average_precision_score(X.label, X.p):.5f}",
-           f"- best iterations {iters}, final rounds {n_rounds}",
+           f"- model backend {backend}, best iterations {iters}, final rounds {n_rounds}",
            f"- decision: {params}", f"- **OOF macro F0.5 {score:.5f}**; breakdown {bd}",
            f"- ceiling after pruning: {ceil}", "", "## Top features (gain)", "",
            imp.head(40).round(0).to_string()]
@@ -172,7 +167,7 @@ def train(data_dir, work_dir, train_frac=0.25, tune_s1=400_000, max_rounds=2000)
 def predict(work_dir, out_dir):
     b = pickle.load(open(os.path.join(work_dir, "model2.pkl"), "rb"))
     X = pd.read_parquet(feat_path(work_dir, "test"))
-    X["p"] = b["model"].predict(X[b["feats"]])
+    X["p"] = b["model"].predict(X)
     s1_ids = load_prep(work_dir, "test", (1,), ["entity_id"])["entity_id"].values
     o_ids = load_prep(work_dir, "test", (2, 3), ["entity_id"])["entity_id"].values
     pred = apply_rule(X[["s1", "o", "p"]].rename(columns={"s1": "s1_id", "o": "cand_id"}), b["params"])
