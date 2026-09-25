@@ -36,7 +36,9 @@ python3 utils/validate_submission.py --matching output/matching_results.tsv \
         --candidate output/candidate_pairs.tsv --test-dir dataset/test
 ```
 
-`pipeline.py all` runs train + predict in one go. No external data, APIs or
+`pipeline.py all` runs train + predict in one go. Other sub-commands: `blocking` (candidate recall
+report only) and `features` (build + cache pair features in `work/cache_*.pkl`; `train`/`predict`
+reuse the cache while the data files and blocking config are unchanged, and `--no-cache` forces a rebuild). No external data, APIs or
 geocoders are used: everything is learned from the provided training files.
 
 ### Smoke test without the real data

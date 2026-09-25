@@ -1,0 +1,61 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug: pipeline all (sample data)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/code/business_entity_resolution/src/pipeline.py",
+      "args": [
+        "all",
+        "--data-dir",
+        "dataset_sample",
+        "--work-dir",
+        "work_sample",
+        "--out-dir",
+        "output_sample",
+        "--folds",
+        "3"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Debug: blocking (sample data)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/code/business_entity_resolution/src/pipeline.py",
+      "args": [
+        "blocking",
+        "--data-dir",
+        "dataset_sample"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Debug: EDA (sample data)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/code/business_entity_resolution/src/eda.py",
+      "args": [
+        "--data-dir",
+        "dataset_sample",
+        "--out-dir",
+        "reports/eda_sample"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Debug: current file",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ]
+}

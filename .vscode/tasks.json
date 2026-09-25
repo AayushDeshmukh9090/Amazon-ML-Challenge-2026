@@ -1,0 +1,215 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ER: setup (pip install)",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "run.py",
+        "setup"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      },
+      "detail": "install pinned requirements into the selected interpreter"
+    },
+    {
+      "label": "ER: check data",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "run.py",
+        "check-data"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      },
+      "detail": "verify dataset/ files"
+    },
+    {
+      "label": "ER: smoke test (synthetic)",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "run.py",
+        "smoke"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      },
+      "detail": "does the code run end-to-end? ~1 min",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "ER: EDA report",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "run.py",
+        "eda"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      },
+      "detail": "-> reports/eda/eda_report.md"
+    },
+    {
+      "label": "ER: make 10% sample",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "run.py",
+        "sample"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      },
+      "detail": "-> dataset_sample/"
+    },
+    {
+      "label": "ER: blocking recall (full data)",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "run.py",
+        "blocking"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      },
+      "detail": "candidate generation only, cheap"
+    },
+    {
+      "label": "ER: quick pipeline (sample)",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "run.py",
+        "quick"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      },
+      "detail": "train+predict on dataset_sample -> work_sample/, output_sample/",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "ER: validate output",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "run.py",
+        "validate"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      },
+      "detail": "official validator if copied into utils/"
+    },
+    {
+      "label": "ER: build submission zip",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "run.py",
+        "zip",
+        "--team",
+        "${input:team}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      },
+      "detail": ""
+    },
+    {
+      "label": "ER: HEAVY train+predict on Modal",
+      "type": "shell",
+      "command": "modal",
+      "args": [
+        "run",
+        "remote/modal_app.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "detail": "full data on 16 cores; results copied back to output/ and work/"
+    },
+    {
+      "label": "ER: upload dataset to Modal",
+      "type": "shell",
+      "command": "modal",
+      "args": [
+        "run",
+        "remote/modal_app.py",
+        "--upload",
+        "--task",
+        "upload"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "team",
+      "type": "promptString",
+      "description": "Team name",
+      "default": "team"
+    }
+  ]
+}

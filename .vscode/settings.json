@@ -1,0 +1,22 @@
+{
+  "python.analysis.extraPaths": [
+    "code/business_entity_resolution/src"
+  ],
+  "python.terminal.activateEnvironment": true,
+  "files.associations": {
+    "*.tsv": "plaintext"
+  },
+  "files.watcherExclude": {
+    "**/dataset/**": true,
+    "**/work*/**": true,
+    "**/.venv/**": true
+  },
+  "search.exclude": {
+    "**/dataset/**": true,
+    "**/dataset_sample/**": true,
+    "**/work*/**": true
+  },
+  "editor.rulers": [
+    120
+  ]
+}

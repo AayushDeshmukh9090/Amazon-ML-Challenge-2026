@@ -42,7 +42,23 @@ def log(*a):
     print(f"[{time.time() - T0:7.1f}s]", *a, flush=True)
 
 
-def build_split(data_dir, split, cfg: BlockConfig, work_dir=None):
+def data_sig(data_dir, split):
+    """Fingerprint of the split's files (name, size) so a cache is never reused for other data."""
+    d = os.path.join(data_dir, split)
+    return sorted((f, os.path.getsize(os.path.join(d, f))) for f in os.listdir(d) if f.endswith(".tsv"))
+
+
+def build_split(data_dir, split, cfg: BlockConfig, work_dir=None, features=True, use_cache=True):
+    """Blocking (+ features). With work_dir, the result is cached in work_dir/cache_<split>.pkl
+    so the (slow) feature build can be done once - e.g. locally - and reused for training elsewhere."""
+    cache = os.path.join(work_dir, f"cache_{split}.pkl") if work_dir else None
+    if features and use_cache and cache and os.path.exists(cache):
+        with open(cache, "rb") as fh:
+            obj = pickle.load(fh)
+        if obj.get("cfg") == cfg.__dict__ and obj.get("sig") == data_sig(data_dir, split):
+            log(f"loaded cached {split} features from {cache}: {obj['X'].shape}")
+            return obj["s1"], obj["oth"], obj["gt"], obj["cands"], obj["X"]
+        log("cache exists but data or blocking config changed -> rebuilding")
     s1, s2, s3, gt = load_split(data_dir, split)
     s1 = prepare(s1)
     oth = prepare(pd.concat([s2, s3], ignore_index=True))
@@ -62,8 +78,16 @@ def build_split(data_dir, split, cfg: BlockConfig, work_dir=None):
             only = {k: v - set().union(*[per[o].get(k, set()) for o in per if o != name]) for k, v in d.items()}
             ro = blocking_report(only, truth, len(s1), len(oth))
             log(f"     unique contribution: {ro['pair_recall']:.4f}")
+    if not features:
+        return s1, oth, gt, cands, None
     X = build_features(pairs, s1, oth, space)
     log(f"features: {X.shape}")
+    if cache:
+        os.makedirs(work_dir, exist_ok=True)
+        with open(cache, "wb") as fh:
+            pickle.dump({"cfg": cfg.__dict__, "sig": data_sig(data_dir, split), "s1": s1, "oth": oth, "gt": gt, "cands": cands, "X": X}, fh,
+                        protocol=pickle.HIGHEST_PROTOCOL)
+        log(f"cached -> {cache}")
     return s1, oth, gt, cands, X
 
 
@@ -79,7 +103,8 @@ def fit_lgb(X, y, params, seed, num_rounds, Xv=None, yv=None):
 
 def cmd_train(args):
     cfg = BlockConfig()
-    s1, oth, gt, cands, X = build_split(args.data_dir, "train", cfg)
+    s1, oth, gt, cands, X = build_split(args.data_dir, "train", cfg, args.work_dir, use_cache=not args.no_cache)
+    X = X.copy()
     truth = gt_to_dict(gt)
     lab = {(a, b) for a, v in truth.items() for b in v}
     X["label"] = [int((a, b) in lab) for a, b in zip(X["s1_id"], X["cand_id"])]
@@ -147,7 +172,8 @@ def cmd_predict(args):
     with open(os.path.join(args.work_dir, "model.pkl"), "rb") as fh:
         bundle = pickle.load(fh)
     cfg = BlockConfig(**bundle["cfg"])
-    s1, oth, _, cands, X = build_split(args.data_dir, "test", cfg)
+    s1, oth, _, cands, X = build_split(args.data_dir, "test", cfg, args.work_dir, use_cache=not args.no_cache)
+    X = X.copy()
     feats = bundle["feats"]
     X["p"] = np.mean([m.predict(X[feats]) for m in bundle["models"]], axis=0)
     pred = apply_rule(X[["s1_id", "cand_id", "p"]], bundle["params"])
@@ -164,15 +190,33 @@ def cmd_predict(args):
     log(f"wrote {args.out_dir}: {n_match:,} matches; share of S1 with >=1 match by country:\n{by_c.to_string()}")
 
 
+def cmd_blocking(args):
+    """Cheap: candidate generation + recall report only (no features / model)."""
+    for split in ("train",) + (("test",) if args.with_test else ()):
+        build_split(args.data_dir, split, BlockConfig(), features=False)
+
+
+def cmd_features(args):
+    """Build + cache pair features for train and test (reused by train / predict)."""
+    for split in ("train", "test"):
+        build_split(args.data_dir, split, BlockConfig(), args.work_dir, use_cache=not args.no_cache)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["train", "predict", "all"])
+    ap.add_argument("cmd", choices=["blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
     ap.add_argument("--work-dir", default="work")
     ap.add_argument("--out-dir", default="output")
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--skip-loco", action="store_true")
+    ap.add_argument("--no-cache", action="store_true", help="ignore cached features in work-dir")
+    ap.add_argument("--with-test", action="store_true", help="blocking: also run on test (no recall)")
     args = ap.parse_args()
+    if args.cmd == "blocking":
+        return cmd_blocking(args)
+    if args.cmd == "features":
+        return cmd_features(args)
     if args.cmd in ("train", "all"):
         cmd_train(args)
     if args.cmd in ("predict", "all"):

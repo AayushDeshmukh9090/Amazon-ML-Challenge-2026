@@ -1,9 +1,30 @@
-# data & generated artefacts (never commit the challenge data)
-dataset/
+# ---- data: never committed (folder skeleton + README are) ----
+dataset/*
+!dataset/README.md
+!dataset/train/
+!dataset/test/
+dataset/train/*
+dataset/test/*
+!dataset/train/.gitkeep
+!dataset/test/.gitkeep
+dataset_sample/
+dataset_synth/
+
+# ---- generated ----
 work/
-output/*.tsv
+work_sample/
+output/*
+!output/.gitkeep
+output_sample/
 reports/eda/*.png
+reports/eda/*.tsv
+reports/eda_sample/
+*_submission.zip
+utils/validate_submission.py
+
+# ---- env ----
+.venv/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-*.zip
+.DS_Store
