@@ -1,0 +1,9 @@
+# data & generated artefacts (never commit the challenge data)
+dataset/
+work/
+output/*.tsv
+reports/eda/*.png
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.zip
