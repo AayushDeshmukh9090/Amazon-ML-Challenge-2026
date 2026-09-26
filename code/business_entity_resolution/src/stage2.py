@@ -163,19 +163,37 @@ def agg_features(X: pd.DataFrame, p: np.ndarray) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------------- training
-def _kfold(backend, X, y, feats, fold, u, k, max_rounds, tag, log=log):
-    """k-fold by S1 entity -> (OOF predictions, models, best iterations)."""
+def _kfold(backend, X, y, feats, fold, u, k, max_rounds, tag, ckpt_dir=None, sig=None, log=log):
+    """k-fold by S1 entity -> (OOF predictions, models, best iterations).
+    Each finished fold is checkpointed to ckpt_dir; a rerun with the same signature (same features
+    file, folds, backend, settings) reloads it instead of retraining -> interrupted runs resume."""
     oof = np.zeros(len(X))
     models, iters = [], []
     for f in range(k):
+        path = os.path.join(ckpt_dir, f"{tag}_fold{f}.pkl") if ckpt_dir else None
+        if path and os.path.exists(path):
+            with open(path, "rb") as fh:
+                ck = pickle.load(fh)
+            if ck.get("sig") == sig:
+                oof[fold == f] = ck["oof"]
+                models.append(ck["model"])
+                iters.append(ck["model"].best_iteration)
+                log(f"{tag} fold {f}: resumed from checkpoint (best_iter {ck['model'].best_iteration})")
+                continue
         tr = fold != f
         es = (fold == f) & (u < 0.08)                         # early-stopping slice of the held-out fold
         m = gbm.fit(backend, X.loc[tr, feats], y[tr], feats, max_rounds, seed=f,
                     Xva=X.loc[es, feats], yva=y[es], log=log)
-        oof[fold == f] = m.predict(X.loc[fold == f, feats])
+        part = m.predict(X.loc[fold == f, feats])
+        oof[fold == f] = part
         models.append(m)
         iters.append(m.best_iteration)
         log(f"{tag} fold {f}: trained on {tr.sum():,} pairs, best_iter {m.best_iteration}")
+        if path:
+            os.makedirs(ckpt_dir, exist_ok=True)
+            with open(path + ".tmp", "wb") as fh:
+                pickle.dump({"sig": sig, "oof": part, "model": m}, fh)
+            os.replace(path + ".tmp", path)
     return oof, models, iters
 
 
@@ -203,8 +221,11 @@ def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
     from sklearn.metrics import average_precision_score, roc_auc_score
     lab = y.astype(bool)
 
-    # ---- level 1
-    p1, m1, it1 = _kfold(backend, X, y, feats, fold, u, n_folds, max_rounds, "L1")
+    # ---- level 1  (fold checkpoints in work/ckpt: an interrupted run resumes at the next fold)
+    ckpt = os.path.join(work_dir, "ckpt")
+    sig = {"feat_mtime": os.path.getmtime(feat_path(work_dir, "train")), "folds": n_folds, "backend": backend,
+           "max_rounds": max_rounds, "feats": feats, "params": gbm.XGB if backend == "xgb" else gbm.LGB}
+    p1, m1, it1 = _kfold(backend, X, y, feats, fold, u, n_folds, max_rounds, "L1", ckpt, sig)
     t1, sc1 = tune_threshold(s1, o, p1, lab, n_true)
     log(f"L1 OOF AUC {roc_auc_score(y, p1):.5f} AP {average_precision_score(y, p1):.5f}; "
         f"macro F0.5 {sc1:.5f} @ t={t1}")
@@ -215,7 +236,7 @@ def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
         X[c] = A[c].to_numpy()
     del A
     feats2 = feats + AGG
-    p2, m2, it2 = _kfold(backend, X, y, feats2, fold, u, n_folds, max_rounds, "L2")
+    p2, m2, it2 = _kfold(backend, X, y, feats2, fold, u, n_folds, max_rounds, "L2", ckpt, {**sig, "level": 2})
     t2, sc2 = tune_threshold(s1, o, p2, lab, n_true)
     log(f"L2 OOF AUC {roc_auc_score(y, p2):.5f} AP {average_precision_score(y, p2):.5f}; "
         f"macro F0.5 {sc2:.5f} @ t={t2}")

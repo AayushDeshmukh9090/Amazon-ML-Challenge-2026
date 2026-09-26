@@ -10,7 +10,9 @@ Every run is launched from the repo root:
     modal run remote/modal_app.py --task model    # any task: eda | data | model | full | synonyms | prep | ...
     modal run remote/modal_app.py --task train --extra "--folds 5 --skip-loco"
     modal run remote/modal_app.py --gpu no        # force CPU only (default: GPU for full/model/train2/predict2)
-    modal run --detach remote/modal_app.py        # keeps running if your laptop sleeps / disconnects;
+    python remote/launch.py model                 # RECOMMENDED for long jobs: runs fully server-side,
+                                                  # immune to laptop sleep / network drops (see launch.py)
+    modal run --detach remote/modal_app.py        # client-attached: a network drop can cancel the job;
                                                   # afterwards fetch results with:  --task download
 
 Your *current local code* is shipped on every run (src/ is mounted), so edit in VS Code,
@@ -75,13 +77,28 @@ def _run(task: str, extra: str = "") -> int:
                "--work-dir", "/vol/work", "--out-dir", "/vol/output"]
     cmd += shlex.split(extra)
     print("$", " ".join(cmd), flush=True)
-    with open("/vol/logs/last_run.log", "w") as log:
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in p.stdout:                     # stream to your terminal AND keep a copy in the volume
-            print(line, end="", flush=True)
-            log.write(line)
-        rc = p.wait()
-    vol.commit()
+    import threading
+    stop = threading.Event()
+
+    def _autocommit():                            # persist checkpoints even if the job is killed later
+        while not stop.wait(300):
+            try:
+                vol.commit()
+            except Exception as e:  # noqa: BLE001
+                print(f"[autocommit] {e}", flush=True)
+
+    threading.Thread(target=_autocommit, daemon=True).start()
+    try:
+        with open("/vol/logs/last_run.log", "w") as log:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for line in p.stdout:                 # stream to the Modal logs AND keep a copy in the volume
+                print(line, end="", flush=True)
+                log.write(line)
+                log.flush()
+            rc = p.wait()
+    finally:
+        stop.set()
+        vol.commit()
     return rc
 
 
