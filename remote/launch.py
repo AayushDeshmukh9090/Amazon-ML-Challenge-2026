@@ -21,7 +21,7 @@ import modal
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 APP = "amazon-ml-2026-er"
-GPU_TASKS = {"full", "model", "train2", "predict2", "diagnose"}
+GPU_TASKS = {"full", "model", "train2", "predict2", "diagnose", "selftrain"}
 LAST = os.path.join(ROOT, "work", "last_modal_call.txt")
 
 

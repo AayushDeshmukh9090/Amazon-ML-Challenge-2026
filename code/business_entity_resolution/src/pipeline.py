@@ -322,7 +322,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["data", "model", "full",
                                     "synonyms", "prep", "block", "prefilter", "features2", "embed", "train2",
-                                    "predict2", "diagnose",
+                                    "predict2", "diagnose", "selftrain",
                                     "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
     ap.add_argument("--work-dir", default="work")
@@ -349,6 +349,7 @@ def main():
     ap.add_argument("--F", type=int, default=None, help="prune: keep r_fwd <= F (default: auto)")
     ap.add_argument("--train-frac", type=float, default=0.25, help="share of S1 entities used per fold model")
     ap.add_argument("--max-rounds", type=int, default=3000)
+    ap.add_argument("--skip-sim", action="store_true", help="selftrain: skip the labelled simulation")
     ap.add_argument("--embed", default="auto", choices=["auto", "no"],
                     help="multilingual name-embedding features: auto = when a GPU is present")
     ap.add_argument("--k-folds", type=int, default=3, help="stage-2 folds by S1 entity (level 1 and level 2)")
@@ -360,7 +361,9 @@ def main():
           "features2": cmd_features2, "embed": cmd_embed, "data": cmd_data,
           "train2": lambda a: cmd_model(a, ("train2",)), "predict2": lambda a: cmd_model(a, ("predict2",)),
           "model": cmd_model,
-          "diagnose": lambda a: __import__("diagnose").run(a.data_dir, a.work_dir, a.max_rounds)}
+          "diagnose": lambda a: __import__("diagnose").run(a.data_dir, a.work_dir, a.max_rounds),
+          "selftrain": lambda a: __import__("selftrain").run(a.data_dir, a.work_dir, a.out_dir, a.k_folds,
+                                                             a.max_rounds, skip_sim=a.skip_sim)}
     if args.cmd in v2:
         return v2[args.cmd](args)
     if args.cmd == "full":          # data (incremental) + model
