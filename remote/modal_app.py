@@ -54,6 +54,7 @@ image = (
 DOWNLOADS = [
     ("output/matching_results.tsv", "output/matching_results.tsv"),
     ("output/candidate_pairs.tsv", "output/candidate_pairs.tsv"),
+    ("output/run_info.json", "output/run_info.json"),
     ("work/train_summary.json", "work/train_summary.json"),
     ("work/feature_importance.csv", "work/feature_importance.csv"),
     ("work/model.pkl", "work/model.pkl"),
@@ -159,3 +160,7 @@ def main(task: str = "full", extra: str = "", upload: bool = False, download: bo
             print(f"remote task failed (exit {rc}); log copied to work/modal_last_run.log")
     if download:
         _download("eda" if task == "eda" else "pipeline")
+        info = os.path.join(ROOT, "output", "run_info.json")
+        if task != "eda" and os.path.exists(info):
+            print("\noutput/run_info.json (which run these outputs come from):")
+            print(open(info).read())

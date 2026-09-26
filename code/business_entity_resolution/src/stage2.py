@@ -289,8 +289,18 @@ def predict(work_dir, out_dir):
                    {s1_ids[k]: v for k, v in match.items()}, "matched_entity_ids")
     ck = load_prep(work_dir, "test", (1,), ["ckey"])["ckey"].to_numpy()
     nm = np.bincount(s1[keep], minlength=len(s1_ids))
+    per_country = {}
     for c in np.unique(ck):
         sel = ck == c
+        per_country[str(c)] = {"s1": int(sel.sum()), "mean_matches": round(float(nm[sel].mean()), 4),
+                               "empty_share": round(float(np.mean(nm[sel] == 0)), 4)}
         log(f"  test {c}: {sel.sum():,} S1, mean matches {nm[sel].mean():.2f}, empty {np.mean(nm[sel] == 0):.2%}")
+    # identity card of this output, so an uploaded file can always be traced to its run
+    info = {"written_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+            "model_levels": "L1+L2" if b["use_l2"] else "L1", "n_fold_models": len(b["l1"]),
+            "threshold": b["threshold"], "n_matches": int(keep.sum()), "n_candidates": int(len(X)),
+            "per_country": per_country}
+    with open(os.path.join(out_dir, "run_info.json"), "w") as fh:
+        json.dump(info, fh, indent=1)
     log(f"wrote {out_dir}: {len(s1_ids):,} S1 rows, {int(keep.sum()):,} matches "
         f"({keep.sum() / len(s1_ids):.2f}/S1), candidates {len(X):,}")
