@@ -116,6 +116,34 @@ def tune_threshold(s1, o, p, label, n_true, log=log):
     return res[0][1], res[0][0]
 
 
+def tune_country_thresholds(s1, o, p, label, n_true, ckey_s1, t_global, min_s1=50_000, min_gain=3e-4, log=log):
+    """Per-country threshold, adopted only when it beats the global one on that country by > min_gain
+    (hundreds of thousands of entities per country -> no noise fitting). Unseen countries (France)
+    fall back to the global threshold."""
+    best_mask = one_to_one_best(s1, o, p)
+    out = {"_global": float(t_global)}
+    for c in np.unique(ckey_s1):
+        ids = np.where(ckey_s1 == c)[0]
+        if len(ids) < min_s1:
+            continue
+        base = macro_f05(s1, best_mask & (p >= t_global), label, n_true, ids)["macro"]
+        grid = [(macro_f05(s1, best_mask & (p >= t), label, n_true, ids)["macro"], float(t))
+                for t in np.round(np.arange(0.05, 0.96, 0.01), 2)]
+        sc, t = max(grid)
+        log(f"  country {c}: global t={t_global} -> {base:.5f}; own t={t} -> {sc:.5f}")
+        if sc - base > min_gain:
+            out[str(c)] = t
+    return out
+
+
+def pair_thresholds(thresholds: dict, ckey_per_pair: np.ndarray) -> np.ndarray:
+    t = np.full(len(ckey_per_pair), thresholds["_global"], dtype=np.float64)
+    for c, v in thresholds.items():
+        if c != "_global":
+            t[ckey_per_pair == c] = v
+    return t
+
+
 # ----------------------------------------------------------------------------- level-2 (collective) features
 AGG = ["l1_p", "l1_rank_o", "l1_best_other_o", "l1_gap_o", "l1_n_hi_o", "l1_sum_o",
        "l1_rank_s1", "l1_max_s1", "l1_best_other_s1", "l1_sum_s1", "l1_n_hi_s1", "l1_n_assigned_s1",
@@ -243,21 +271,23 @@ def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
 
     use_l2 = sc2 >= sc1
     p_fin, t_fin, sc = (p2, t2, sc2) if use_l2 else (p1, t1, sc1)
-    pred = one_to_one_best(s1, o, p_fin) & (p_fin >= t_fin)
+    ck = load_prep(work_dir, "train", (1,), ["ckey"])["ckey"].to_numpy()
+    thresholds = tune_country_thresholds(s1, o, p_fin, lab, n_true, ck, t_fin)
+    pred = one_to_one_best(s1, o, p_fin) & (p_fin >= pair_thresholds(thresholds, ck[s1]))
     bd = macro_f05(s1, pred, lab, n_true)
     ceil = macro_f05(s1, lab, lab, n_true)
-    ck = load_prep(work_dir, "train", (1,), ["ckey"])["ckey"].to_numpy()
     by_c = {c: macro_f05(s1, pred, lab, n_true, np.where(ck == c)[0])["macro"] for c in np.unique(ck)}
     imp = m2[0].importance() if use_l2 else m1[0].importance()
     with open(os.path.join(work_dir, "model2.pkl"), "wb") as fh:
         pickle.dump({"l1": m1, "l2": m2 if use_l2 else None, "feats": feats, "feats2": feats2,
-                     "threshold": t_fin, "use_l2": use_l2}, fh)
+                     "threshold": t_fin, "thresholds": thresholds, "use_l2": use_l2}, fh)
     rep = ["# Stage-2 report", "", f"- train pairs {len(X):,}, positives {int(y.sum()):,}",
            f"- pair recall of scored pairs: {y.sum() / len(ex):.4f}",
            f"- backend {backend}, {n_folds} folds; L1 best iterations {it1}; L2 best iterations {it2}",
            f"- L1: AUC {roc_auc_score(y, p1):.5f}, macro F0.5 {sc1:.5f} @ t={t1}",
            f"- L2: AUC {roc_auc_score(y, p2):.5f}, macro F0.5 {sc2:.5f} @ t={t2}",
            f"- **used {'L2' if use_l2 else 'L1'}: OOF macro F0.5 {bd['macro']:.5f}** (all {len(s1_ids):,} train S1)",
+           f"- thresholds {thresholds} (countries not listed, e.g. unseen France, use _global)",
            f"- breakdown {bd}", f"- by country {by_c}",
            f"- ceiling (perfect matcher on scored pairs) {ceil}", "", "## Top features (gain)", "",
            imp.head(40).round(0).to_string()]
@@ -277,7 +307,9 @@ def predict(work_dir, out_dir):
         p = np.mean([m.predict(X[b["feats2"]]) for m in b["l2"]], axis=0)
         log(f"L2 test scores from {len(b['l2'])} fold models")
     s1, o = X["s1"].to_numpy(), X["o"].to_numpy()
-    keep = one_to_one_best(s1, o, p) & (p >= b["threshold"])
+    ck_test = load_prep(work_dir, "test", (1,), ["ckey"])["ckey"].to_numpy()
+    thresholds = b.get("thresholds", {"_global": b["threshold"]})
+    keep = one_to_one_best(s1, o, p) & (p >= pair_thresholds(thresholds, ck_test[s1]))
     s1_ids = load_prep(work_dir, "test", (1,), ["entity_id"])["entity_id"].to_numpy()
     o_ids = load_prep(work_dir, "test", (2, 3), ["entity_id"])["entity_id"].to_numpy()
     os.makedirs(out_dir, exist_ok=True)
@@ -298,7 +330,7 @@ def predict(work_dir, out_dir):
     # identity card of this output, so an uploaded file can always be traced to its run
     info = {"written_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
             "model_levels": "L1+L2" if b["use_l2"] else "L1", "n_fold_models": len(b["l1"]),
-            "threshold": b["threshold"], "n_matches": int(keep.sum()), "n_candidates": int(len(X)),
+            "thresholds": thresholds, "n_matches": int(keep.sum()), "n_candidates": int(len(X)),
             "per_country": per_country}
     with open(os.path.join(out_dir, "run_info.json"), "w") as fh:
         json.dump(info, fh, indent=1)

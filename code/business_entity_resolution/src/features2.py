@@ -146,6 +146,13 @@ def pair_features(A: pd.DataFrame, B: pd.DataFrame, idf_n, dn, idf_a, da) -> dic
     F["core_len_b"] = np.array([len(x) for x in cb], np.float32)
     F["core_ntok_diff"] = np.array([len(x.split()) - len(y.split()) for x, y in zip(ca, cb)], np.float32)
     F["name_nonascii_b"] = np.array([any(ord(c) > 127 for c in x) for x in B["name"]], np.float32)
+    # script: beyond Latin Extended = Devanagari / Tamil / Bengali / ... (transliterated before comparing)
+    sa = np.array([any(ord(c) > 0x24F for c in x) for x in A["name"]], np.float32)
+    sb = np.array([any(ord(c) > 0x24F for c in x) for x in B["name"]], np.float32)
+    F["script_a"], F["script_b"], F["script_mismatch"] = sa, sb, (sa != sb).astype(np.float32)
+    F["ns_common_prefix"] = np.array([len(os.path.commonprefix([x, y])) for x, y in zip(nsa, nsb)], np.float32)
+    F["ns_len_ratio"] = np.array([min(len(x), len(y)) / max(len(x), len(y), 1) for x, y in zip(nsa, nsb)],
+                                 np.float32)
     F["dba_best"] = _dba_best(A["name"].tolist(), B["name"].tolist())
     F.update(_tok_feats([set(x.split()) for x in ca], [set(x.split()) for x in cb], idf_n, dn, "ntok"))
     F.update(_tok_feats([set(x.split()) for x in aa], [set(x.split()) for x in ab], idf_a, da, "atok"))
