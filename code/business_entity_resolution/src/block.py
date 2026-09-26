@@ -195,7 +195,11 @@ def true_pairs(data_dir, s1_ids: pd.Series, o_ids: pd.Series) -> pd.DataFrame:
     o_pos = pd.Series(np.arange(len(o_ids), dtype=np.int32), index=o_ids.values)
     ex["s1"] = s1_pos.reindex(ex.s1_id).values
     ex["o"] = o_pos.reindex(ex.o_id).values
-    return ex, gt, sizes
+    # S1 entities not in prep (dropped for training, see prep.drop_s1) do not exist for this run:
+    # their pairs leave the truth, their S2/S3 records simply become unmatched records
+    present = gt["source1_entity_id"].isin(s1_pos.index).to_numpy()
+    ex = ex[ex["s1"].notna()].reset_index(drop=True)
+    return ex, gt[present].reset_index(drop=True), sizes[present]
 
 
 def recall_report(data_dir, work_dir, s1, oth, cands, k_rev, k_fwd):

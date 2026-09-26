@@ -238,7 +238,7 @@ def cmd_synonyms(args):
 
 def cmd_prep(args):
     from prep import prep_all
-    prep_all(args.data_dir, args.work_dir, jobs=args.jobs, force=_forced(args, "prep"))
+    prep_all(args.data_dir, args.work_dir, jobs=args.jobs, force=_forced(args, "prep"), drop_s1=args.drop_s1)
 
 
 def cmd_block(args):
@@ -309,6 +309,9 @@ def main():
     ap.add_argument("--rebuild", choices=DATA_STEPS, default=None,
                     help="force one data step; everything downstream refreshes automatically")
     ap.add_argument("--syn-pairs", type=int, default=800_000)
+    ap.add_argument("--drop-s1", type=float, default=0.19,
+                    help="share of TRAIN S1 entities removed so train has test's distractor density "
+                         "(S2+S3 per S1: train 4.68 -> 5.75 = test); 0 disables")
     ap.add_argument("--splits", default="train,test")
     ap.add_argument("--k-rev", type=int, default=10)
     ap.add_argument("--k-fwd", type=int, default=20)
