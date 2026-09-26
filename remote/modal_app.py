@@ -35,7 +35,7 @@ CPU = 32            # cores: prep / blocking / features run in process pools
 MEMORY_MB = 131072  # 128 GB: ~12M-record token matrices + ~100M candidate pairs
 TIMEOUT_S = 12 * 3600   # ceiling, not cost; caches + checkpoints make a relaunch resume
 GPU = "L4"          # 24 GB NVIDIA GPU for XGBoost training/prediction (tasks in GPU_TASKS)
-GPU_TASKS = {"full", "model", "train2", "predict2"}
+GPU_TASKS = {"full", "model", "train2", "predict2", "diagnose"}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -70,6 +70,7 @@ DOWNLOADS = [
     ("work/blocking_grid.json", "work/blocking_grid.json"),
     ("work/synonyms.json", "work/synonyms.json"),
     ("work/stage2_report.md", "work/stage2_report.md"),
+    ("work/diagnose_report.md", "work/diagnose_report.md"),
     ("logs/last_run.log", "work/modal_last_run.log"),
 ]
 

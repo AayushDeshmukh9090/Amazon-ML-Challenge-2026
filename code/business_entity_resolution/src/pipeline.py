@@ -322,7 +322,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["data", "model", "full",
                                     "synonyms", "prep", "block", "prefilter", "features2", "embed", "train2",
-                                    "predict2",
+                                    "predict2", "diagnose",
                                     "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
     ap.add_argument("--work-dir", default="work")
@@ -359,7 +359,8 @@ def main():
     v2 = {"synonyms": cmd_synonyms, "prep": cmd_prep, "block": cmd_block, "prefilter": cmd_prefilter,
           "features2": cmd_features2, "embed": cmd_embed, "data": cmd_data,
           "train2": lambda a: cmd_model(a, ("train2",)), "predict2": lambda a: cmd_model(a, ("predict2",)),
-          "model": cmd_model}
+          "model": cmd_model,
+          "diagnose": lambda a: __import__("diagnose").run(a.data_dir, a.work_dir, a.max_rounds)}
     if args.cmd in v2:
         return v2[args.cmd](args)
     if args.cmd == "full":          # data (incremental) + model

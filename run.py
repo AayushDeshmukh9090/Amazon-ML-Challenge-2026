@@ -126,7 +126,7 @@ def main():
             sh(PY, "utils/make_sample.py", "--src", "dataset", "--dst", "dataset_sample")
         pipeline("full", "dataset_sample", rest, work="work_sample", out="output_sample")
     elif task in ("full", "data", "model", "synonyms", "prep", "block", "prefilter", "features2", "train2",
-                  "predict2"):
+                  "predict2", "diagnose", "embed"):
         check_data(data)
         pipeline(task, data, rest)
     elif task in ("features", "train", "predict", "all"):  # v1 small-data pipeline (kept for reference)
