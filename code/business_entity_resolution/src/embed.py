@@ -105,6 +105,11 @@ def run(work_dir, split):
     path = emb_path(work_dir, split)
     E.to_parquet(path + ".tmp.parquet", index=False)
     os.replace(path + ".tmp.parquet", path)
+    # identity of the feature file these rows align with (size-based: survives copies between volumes,
+    # which reset modification times)
+    import json
+    with open(path.replace(".parquet", ".json"), "w") as fh:
+        json.dump({"feat_bytes": os.path.getsize(feat_path(work_dir, split)), "rows": int(len(E))}, fh)
     log(f"{split}: embedding features {E.shape} -> {path} "
         f"(mean cos {cos.mean():.3f}; pairs {len(pairs):,})")
 

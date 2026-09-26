@@ -43,8 +43,16 @@ def feat_path(work_dir, split):
 
 
 def _emb_ok(work_dir, split):
+    """Embedding columns are usable if they were built for THIS feature file: compare the size recorded
+    by embed.py (robust to volume copies); fall back to modification times for older files."""
     e, f = os.path.join(work_dir, "feat", f"{split}_emb.parquet"), feat_path(work_dir, split)
-    return os.path.exists(e) and os.path.getmtime(e) >= os.path.getmtime(f)
+    if not os.path.exists(e) or not os.path.exists(f):
+        return False
+    meta = e.replace(".parquet", ".json")
+    if os.path.exists(meta):
+        with open(meta) as fh:
+            return json.load(fh).get("feat_bytes") == os.path.getsize(f)
+    return os.path.getmtime(e) >= os.path.getmtime(f)
 
 
 def load_features(work_dir, split, use_emb: bool):
