@@ -9,3 +9,5 @@ tabulate==0.10.0
 scipy==1.17.1
 pyarrow==25.0.1
 xgboost==3.2.0
+# optional GPU name-embedding step (src/embed.py); on Modal torch comes from the CUDA 12.6 index:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126 && pip install sentence-transformers

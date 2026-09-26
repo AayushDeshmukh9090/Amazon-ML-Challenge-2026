@@ -33,7 +33,7 @@ APP_NAME = "amazon-ml-2026-er"
 VOL_NAME = "amazon-ml-2026"
 CPU = 32            # cores: prep / blocking / features run in process pools
 MEMORY_MB = 131072  # 128 GB: ~12M-record token matrices + ~100M candidate pairs
-TIMEOUT_S = 6 * 3600
+TIMEOUT_S = 12 * 3600   # ceiling, not cost; caches + checkpoints make a relaunch resume
 GPU = "L4"          # 24 GB NVIDIA GPU for XGBoost training/prediction (tasks in GPU_TASKS)
 GPU_TASKS = {"full", "model", "train2", "predict2"}
 
@@ -44,9 +44,15 @@ REQ_LOCAL = os.path.join(ROOT, "code", "business_entity_resolution", "requiremen
 
 app = modal.App(APP_NAME)
 vol = modal.Volume.from_name(VOL_NAME, create_if_missing=True)
+EMB_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"   # Apache-2.0, ~118M params
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install_from_requirements(REQ_LOCAL)
+    # optional name-embedding step (embed.py): CUDA-12.6 PyTorch build for broad driver compatibility,
+    # model weights baked into the image at build time -> no download during a run
+    .pip_install("torch", index_url="https://download.pytorch.org/whl/cu126")
+    .pip_install("sentence-transformers")
+    .run_commands(f"python -c \"from sentence_transformers import SentenceTransformer as S; S('{EMB_MODEL}')\"")
     .add_local_dir(SRC_LOCAL, "/root/src")        # mounted fresh on every run -> always your latest code
 )
 

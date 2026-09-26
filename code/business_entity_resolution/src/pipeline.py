@@ -208,7 +208,7 @@ def cmd_features(args):
 # Every data step skips itself when its outputs are newer than its inputs, so re-running `data` or
 # `full` after a model-only change costs seconds.  `--rebuild STEP` forces one step; everything
 # downstream of it is then refreshed automatically because its inputs became newer.
-DATA_STEPS = ["synonyms", "prep", "block", "prefilter", "features"]
+DATA_STEPS = ["synonyms", "prep", "block", "prefilter", "features", "embed"]
 
 
 def _fresh(outputs, inputs):
@@ -274,12 +274,39 @@ def cmd_features2(args):
         stage2.features(args.work_dir, split, args.R, args.F, args.jobs, force=_forced(args, "features"))
 
 
+def cmd_embed(args):
+    """Optional GPU step; never fails the run (the model simply trains without these columns)."""
+    import embed
+    import stage2
+    if args.embed == "no":
+        return log("[embed] disabled (--embed no)")
+    if not embed.available():
+        return log("[embed] skipped: needs a GPU + torch/sentence-transformers (runs in `full`/GPU jobs)")
+    for split in args.splits.split(","):
+        out, ins = [embed.emb_path(args.work_dir, split)], [stage2.feat_path(args.work_dir, split)]
+        if not _forced(args, "embed") and _fresh(out, ins):
+            _skip(f"embed {split}", out)
+            continue
+        try:
+            embed.run(args.work_dir, split)
+        except Exception as e:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            log(f"[embed] WARNING: failed on {split} ({type(e).__name__}: {e}) - continuing without embeddings")
+            for sp in args.splits.split(","):                 # never leave a half-built pair of files
+                pth = embed.emb_path(args.work_dir, sp)
+                if os.path.exists(pth):
+                    os.remove(pth)
+            return
+
+
 def cmd_data(args):
     cmd_synonyms(args)
     cmd_prep(args)
     cmd_block(args)
     cmd_prefilter(args)
     cmd_features2(args)
+    cmd_embed(args)
 
 
 def cmd_model(args, which=("train2", "predict2")):
@@ -294,7 +321,8 @@ def cmd_model(args, which=("train2", "predict2")):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["data", "model", "full",
-                                    "synonyms", "prep", "block", "prefilter", "features2", "train2", "predict2",
+                                    "synonyms", "prep", "block", "prefilter", "features2", "embed", "train2",
+                                    "predict2",
                                     "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
     ap.add_argument("--work-dir", default="work")
@@ -321,13 +349,15 @@ def main():
     ap.add_argument("--F", type=int, default=None, help="prune: keep r_fwd <= F (default: auto)")
     ap.add_argument("--train-frac", type=float, default=0.25, help="share of S1 entities used per fold model")
     ap.add_argument("--max-rounds", type=int, default=3000)
+    ap.add_argument("--embed", default="auto", choices=["auto", "no"],
+                    help="multilingual name-embedding features: auto = when a GPU is present")
     ap.add_argument("--k-folds", type=int, default=3, help="stage-2 folds by S1 entity (level 1 and level 2)")
     ap.add_argument("--gbm", default="auto", choices=["auto", "xgb", "lgb"],
                     help="auto = XGBoost on GPU if one is present, else LightGBM on CPU")
     ap.add_argument("--budget", type=float, default=4.0, help="prefilter: kept pairs per S2/S3 record")
     args = ap.parse_args()
     v2 = {"synonyms": cmd_synonyms, "prep": cmd_prep, "block": cmd_block, "prefilter": cmd_prefilter,
-          "features2": cmd_features2, "data": cmd_data,
+          "features2": cmd_features2, "embed": cmd_embed, "data": cmd_data,
           "train2": lambda a: cmd_model(a, ("train2",)), "predict2": lambda a: cmd_model(a, ("predict2",)),
           "model": cmd_model}
     if args.cmd in v2:

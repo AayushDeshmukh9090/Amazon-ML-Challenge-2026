@@ -42,6 +42,22 @@ def feat_path(work_dir, split):
     return os.path.join(work_dir, "feat", f"{split}.parquet")
 
 
+def _emb_ok(work_dir, split):
+    e, f = os.path.join(work_dir, "feat", f"{split}_emb.parquet"), feat_path(work_dir, split)
+    return os.path.exists(e) and os.path.getmtime(e) >= os.path.getmtime(f)
+
+
+def load_features(work_dir, split, use_emb: bool):
+    """Cached pair features, plus the optional embedding columns (row-aligned) when requested."""
+    X = pd.read_parquet(feat_path(work_dir, split))
+    if use_emb:
+        E = pd.read_parquet(os.path.join(work_dir, "feat", f"{split}_emb.parquet"))
+        assert len(E) == len(X), f"{split}: embedding rows {len(E)} != feature rows {len(X)}"
+        for c in E.columns:
+            X[c] = E[c].to_numpy()
+    return X
+
+
 def features(work_dir, split, R, F, jobs, force=False):
     path = feat_path(work_dir, split)
     meta = os.path.join(work_dir, "feat", f"{split}.meta.json")
@@ -228,7 +244,9 @@ def _kfold(backend, X, y, feats, fold, u, k, max_rounds, tag, ckpt_dir=None, sig
 def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
     backend = gbm.resolve(backend)
     log(f"model backend: {backend}, {n_folds} folds, max rounds {max_rounds}")
-    X = pd.read_parquet(feat_path(work_dir, "train"))
+    use_emb = _emb_ok(work_dir, "train") and _emb_ok(work_dir, "test")      # both splits or neither
+    X = load_features(work_dir, "train", use_emb)
+    log(f"embedding features: {'used' if use_emb else 'not available'}")
     s1_ids = load_prep(work_dir, "train", (1,), ["entity_id"])["entity_id"]
     o_ids = load_prep(work_dir, "train", (2, 3), ["entity_id"])["entity_id"]
     ex, gt, sizes = true_pairs(data_dir, s1_ids, o_ids)
@@ -251,7 +269,9 @@ def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
 
     # ---- level 1  (fold checkpoints in work/ckpt: an interrupted run resumes at the next fold)
     ckpt = os.path.join(work_dir, "ckpt")
-    sig = {"feat_mtime": os.path.getmtime(feat_path(work_dir, "train")), "folds": n_folds, "backend": backend,
+    sig = {"feat_mtime": os.path.getmtime(feat_path(work_dir, "train")), "use_emb": use_emb,
+           "emb_mtime": os.path.getmtime(os.path.join(work_dir, "feat", "train_emb.parquet")) if use_emb else None,
+           "folds": n_folds, "backend": backend,
            "max_rounds": max_rounds, "feats": feats, "params": gbm.XGB if backend == "xgb" else gbm.LGB}
     p1, m1, it1 = _kfold(backend, X, y, feats, fold, u, n_folds, max_rounds, "L1", ckpt, sig)
     t1, sc1 = tune_threshold(s1, o, p1, lab, n_true)
@@ -280,10 +300,11 @@ def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
     imp = m2[0].importance() if use_l2 else m1[0].importance()
     with open(os.path.join(work_dir, "model2.pkl"), "wb") as fh:
         pickle.dump({"l1": m1, "l2": m2 if use_l2 else None, "feats": feats, "feats2": feats2,
-                     "threshold": t_fin, "thresholds": thresholds, "use_l2": use_l2}, fh)
+                     "threshold": t_fin, "thresholds": thresholds, "use_l2": use_l2, "use_emb": use_emb}, fh)
     rep = ["# Stage-2 report", "", f"- train pairs {len(X):,}, positives {int(y.sum()):,}",
            f"- pair recall of scored pairs: {y.sum() / len(ex):.4f}",
-           f"- backend {backend}, {n_folds} folds; L1 best iterations {it1}; L2 best iterations {it2}",
+           f"- backend {backend}, {n_folds} folds, embedding features {'ON' if use_emb else 'off'}; "
+           f"L1 best iterations {it1}; L2 best iterations {it2}",
            f"- L1: AUC {roc_auc_score(y, p1):.5f}, macro F0.5 {sc1:.5f} @ t={t1}",
            f"- L2: AUC {roc_auc_score(y, p2):.5f}, macro F0.5 {sc2:.5f} @ t={t2}",
            f"- **used {'L2' if use_l2 else 'L1'}: OOF macro F0.5 {bd['macro']:.5f}** (all {len(s1_ids):,} train S1)",
@@ -297,7 +318,7 @@ def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
 
 def predict(work_dir, out_dir):
     b = pickle.load(open(os.path.join(work_dir, "model2.pkl"), "rb"))
-    X = pd.read_parquet(feat_path(work_dir, "test"))
+    X = load_features(work_dir, "test", b.get("use_emb", False))
     p = np.mean([m.predict(X[b["feats"]]) for m in b["l1"]], axis=0)     # same distribution as OOF
     log(f"L1 test scores from {len(b['l1'])} fold models")
     if b["use_l2"]:
