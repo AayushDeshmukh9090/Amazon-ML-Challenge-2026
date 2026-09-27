@@ -1,7 +1,7 @@
 # Methodology: Business Entity Resolution (Amazon ML Challenge 2026)
 
-**Team:** TODO  **Final leaderboard macro F0.5:** TODO (best so far 0.972)
-**Train out-of-fold macro F0.5:** 0.98367 (3-fold by S1 entity, all 1,788,190 training S1 entities, singletons included)
+**Team:** TODO  **Final leaderboard macro F0.5:** 0.98046 (update if a later run scores higher)
+**Train out-of-fold macro F0.5:** 0.98667 (3-fold by S1 entity, all 1,788,190 training S1 entities, singletons included)
 
 ## 1. Methodology overview
 
@@ -30,8 +30,11 @@ The four stages:
    - A cheap LightGBM pre-filter then keeps about 2.5 pairs per record.
 3. **Matching model:**
    - Level 1: XGBoost (CUDA) on 136 pair features.
+   - Cross-encoder: the multilingual MiniLM fine-tuned to read both records' raw
+     "name | address" text together, scored out-of-fold (Section 4).
    - Level 2: XGBoost that also sees the level-1 out-of-fold probabilities aggregated over
-     the record's competing S1 entities and over the S1 entity's other candidates.
+     the record's competing S1 entities and over the S1 entity's other candidates, plus the
+     cross-encoder probability and its context.
 4. **Decision:**
    - Each S2/S3 record is kept only for its most probable S1 (ground truth is one-to-one
      from that side).
@@ -44,7 +47,7 @@ No external data, APIs or geocoders are used. Models used:
 |---|---|---|
 | XGBoost | Apache-2.0 | — |
 | LightGBM | MIT | — |
-| `paraphrase-multilingual-MiniLM-L12-v2` sentence embedding (applied to the provided names only) | Apache-2.0 | ~118M parameters |
+| `paraphrase-multilingual-MiniLM-L12-v2`: sentence embedding of names, and the base of the fine-tuned cross-encoder (applied to the provided data only) | Apache-2.0 | ~118M parameters |
 
 ## 2. EDA findings that shaped the design
 
@@ -108,6 +111,30 @@ contains exactly the pairs the model scores.
   one-to-one winner flag. This lifts OOF macro F0.5 from 0.98314 to 0.98367 (AUC 0.99960 →
   0.99965).
 
+**Cross-encoder (level-2 features).**
+
+- **What it reads:** "S1 name | S1 address" [SEP] "S2/S3 name | S2/S3 address", raw text, with
+  full attention between the two records. The country is not shown to it.
+- **Model:** `paraphrase-multilingual-MiniLM-L12-v2` with a one-logit classification head.
+  - Loss: binary cross-entropy. Optimiser: AdamW, lr 5e-5 with warm-up and linear decay.
+  - Batch 256, bf16, maximum 96 tokens.
+- **Training data:** each fold model is trained on 2M pairs of the other fold, 1 epoch.
+  - Folds: 2, by S1 entity (hash), so every train pair gets an out-of-fold score.
+  - Pairs: each record's best pre-filter pair plus every pair with pre-filter probability
+    ≥ 0.05. That is 10.7M train pairs, covering 99.3% of the true pairs.
+- **Test scoring:** 10.4M test pairs, scored by one fold model, so their distribution matches
+  the out-of-fold scores.
+- **Quality:** held-out AUC 0.99872 / 0.99871 for the cross-encoder alone.
+- **Features passed to level 2:** its probability; its rank, best competing value and gap
+  among the record's candidate S1 entities; and its best competing value among the S1's
+  candidate records. Unscored pairs are left missing.
+- **Level 1 unchanged:** the cross-encoder enters at level 2 only, so level 1 is untouched.
+- **Result:**
+  - OOF macro F0.5 0.98367 → **0.98667** (AUC 0.99975), India 0.97949 → 0.98353, US 0.98647 → 0.98876.
+  - Leaderboard 0.972 → **0.98046**. The leaderboard gain is larger than the OOF gain, which
+    suggests the pretrained multilingual model transfers to the unseen French data better
+    than the hand-made string features.
+
 ## 5. Decision layer (optimising macro F0.5)
 
 Per entity, F0.5 = 1.25·|P∩T| / (0.25·|T| + |P|). An empty P scores 1 only when T is empty.
@@ -115,20 +142,23 @@ Rules compared on out-of-fold probabilities with the exact metric:
 
 | rule | OOF macro F0.5 |
 |---|---|
-| one-to-one + global threshold t = 0.70 | 0.98367 |
-| one-to-one + two thresholds (S1's top pick at p ≥ 0.50, others at p ≥ 0.74) | 0.98384 |
-| one-to-one + expected-F0.5 prefix per S1 (argmax_k 1.25·Σp_1..k / (0.25·Σp + k); empty if ∏(1−p) + 0.05 is larger) | 0.98385 |
+| one-to-one + global threshold t = 0.72 | 0.98667 |
+| one-to-one + two thresholds (S1's top pick at p ≥ 0.60, others at p ≥ 0.76) | 0.98676 |
+| one-to-one + expected-F0.5 prefix per S1 (argmax_k 1.25·Σp_1..k / (0.25·Σp + k); empty if ∏(1−p) + 0.2 is larger) | 0.98676 |
+
+(Without the cross-encoder the same comparison gave 0.98367 / 0.98384 / 0.98385.)
 
 Per-country thresholds are adopted only when they beat the global threshold on that country
-by more than 3·10⁻⁴; none did. France uses the global rule. Chosen rule: TODO (the threshold
-unless the expected-F0.5 rule is forced with `--min-gain 0`).
+by more than 3·10⁻⁴; none did. France uses the global rule. Chosen rule: the global
+threshold t = 0.72. The per-S1 rules gain less than 2·10⁻⁴ OOF, below the adoption bar.
 
 ## 6. Validation
 
-- **OOF macro F0.5 by S1 group:** 0.98367 overall.
-  - by group: singleton 0.9907 (99,930 S1) / one match 0.9412 (96,664) / several matches
-    0.9858 (1,591,596)
-  - by country: India 0.97949, US 0.98647
+- **OOF macro F0.5 by S1 group:** 0.98667 overall.
+  - by group: singleton 0.9955 (99,930 S1) / one match 0.9542 (96,664) / several matches
+    0.9881 (1,591,596)
+  - by country: India 0.98353, US 0.98876
+  - A perfect matcher on the scored pairs would reach 0.9946.
 - **Unseen-country simulation**, a proxy for France. Train on one country, score the other,
   with equal training size:
 
@@ -139,7 +169,7 @@ unless the expected-F0.5 rule is forced with `--min-gain 0`).
 
   The best threshold barely differed from the transferred one, so the loss comes from
   scoring, not calibration.
-- **Error analysis** (out-of-fold, lost points = 100 × (1 − macro F0.5)):
+- **Error analysis** (out-of-fold, before the cross-encoder; lost points = 100 × (1 − macro F0.5)):
   - India: missing candidates 0.45, true pair below threshold 0.27, prediction with no true entity 0.13
   - US: missing candidates 0.22, true pair below threshold 0.46, prediction with no true entity 0.15
 
@@ -157,6 +187,10 @@ unless the expected-F0.5 rule is forced with `--min-gain 0`).
 - **Runtime:** measured on 32 CPU cores + one NVIDIA L4 (Modal).
   - Embedding neighbours (both splits): 1.2 h. Pre-filter: 17 min. Features: 29 min.
   - Model: 1.4 h to train and about 15 min to predict.
+  - Cross-encoder (one NVIDIA H100): 2 × 23 min fine-tuning (≈1,460 pairs/s), 2 × 12 min
+    out-of-fold scoring, 25 min test scoring (≈8,000 pairs/s).
+  - Level 2 + decision + prediction with the cross-encoder: about 45 min (level 1 reused from
+    its checkpoints).
   - Token candidate search and normalisation were cached from earlier runs and not re-timed.
 - **Licenses:** XGBoost (Apache-2.0), LightGBM (MIT), scikit-learn (BSD-3), rapidfuzz (MIT),
   PyTorch (BSD), sentence-transformers and MiniLM (Apache-2.0). Unidecode (GPL-2) is used only
@@ -164,6 +198,4 @@ unless the expected-F0.5 rule is forced with `--min-gain 0`).
 - **Tried and not adopted:**
   - Pseudo-label self-training on test: the unseen-country simulation was mixed, so it was
     not submitted.
-  - A fine-tuned MiniLM cross-encoder stacked into the GBM (`crossenc.py`, implemented and
-    tested): not run at full scale for lack of time before the deadline.
-  - Per-S1 decision rules: +0.0002 out-of-fold (Section 5).
+  - Per-S1 decision rules: +0.0001 to +0.0002 out-of-fold (Section 5), below the adoption bar.

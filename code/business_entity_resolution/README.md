@@ -1,15 +1,17 @@
 # Business Entity Resolution: Amazon ML Challenge 2026
 
 Pipeline: **normalise → token + embedding candidate search → learned pre-filter → pair features →
-2-level XGBoost (3-fold out-of-fold by S1) → one-to-one assignment → F0.5-tuned decision → `output/`**.
-See `Documentation_template.md` for the method and results.
+level-1 XGBoost + fine-tuned multilingual cross-encoder → level-2 XGBoost (3-fold out-of-fold by S1) →
+one-to-one assignment → F0.5-tuned decision → `output/`**.
+Best result: leaderboard 0.98046, train out-of-fold 0.98667. See `Documentation_template.md` for the
+method and results.
 
 ## Setup
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate      # Python 3.11
 pip install -r code/business_entity_resolution/requirements.txt
-# GPU steps (embedding neighbours / features, optional cross-encoder):
+# GPU steps (embedding neighbours / features, cross-encoder):
 pip install torch --index-url https://download.pytorch.org/whl/cu126 && pip install sentence-transformers
 ```
 
@@ -21,11 +23,12 @@ Data layout: `dataset/train/train_source{1,2,3}.tsv`, `dataset/train/train_groun
 ```bash
 SRC=code/business_entity_resolution/src
 python3 $SRC/pipeline.py data  --data-dir dataset --work-dir work                   # cached, incremental
-python3 $SRC/pipeline.py model --data-dir dataset --work-dir work --out-dir output  # train + decide + predict
+python3 $SRC/pipeline.py stack --data-dir dataset --work-dir work --out-dir output  # cross-encoder + model
+# (or: `crossenc`, then `model` = train + decide + predict)
 python3 utils/validate_submission.py ...                                            # official checker
 ```
 
-`full` runs both. Every data step skips itself when its outputs are newer than its inputs, and
+`full` runs `data` (which ends with `crossenc`) and then `model`. Every data step skips itself when its outputs are newer than its inputs, and
 `--rebuild STEP` forces one step and everything downstream of it. The GPU steps (`embblock`,
 `embed`, `crossenc`) are skipped automatically without a CUDA device. `decide` re-tunes the decision
 rule and re-predicts with the trained models. For large runs on Modal, see `remote/launch.py`.
@@ -41,6 +44,9 @@ Main flags:
 | `--budget` | 4 | pre-filter pairs per record |
 | `--min-gain` | 2e-4 | out-of-fold gain a per-S1 decision rule needs over the global threshold |
 | `--ce` | auto | cross-encoder features (auto = on when a GPU is present) |
+| `--ce-train` | 2,000,000 | cross-encoder training pairs per fold |
+| `--ce-k-top`, `--ce-p1-min` | 1, 0.05 | pairs the cross-encoder scores: each record's top pairs by pre-filter probability, plus every pair above this |
+| `--ce-continue` | 0 | continue training the saved cross-encoder models on this many new pairs per fold (with `--rebuild crossenc`) |
 
 ## Source layout
 
@@ -55,7 +61,7 @@ Main flags:
 | `src/features2.py` | 136 pair features (fuzzy, script, typo, IDF overlap, numbers, frequency, context ranks / gaps) |
 | `src/stage2.py`, `src/gbm.py` | 2-level XGBoost / LightGBM with out-of-fold stacking, threshold tuning, prediction |
 | `src/decide2.py` | per-S1 decision rules (threshold / two-threshold / expected-F0.5) tuned on out-of-fold probabilities |
-| `src/crossenc.py` | optional fine-tuned multilingual cross-encoder stacked as features (GPU) |
+| `src/crossenc.py` | multilingual MiniLM fine-tuned as a pair cross-encoder on raw name/address text, 2-fold out-of-fold; its probability and context feed level 2 (GPU) |
 | `src/diagnose.py`, `src/errors.py`, `src/selftrain.py` | unseen-country simulation, error attribution, pseudo-label self-training |
 | `src/eda.py` | EDA report |
 | `src/pipeline.py` | orchestration (`data`, `model`, `full`, individual steps) |

@@ -13,12 +13,12 @@ LOCAL / cheap (seconds - few minutes on a laptop):
   validate     check output/ (official validator if present in utils/, else ours)
   zip          build <team>_submission.zip   (python run.py zip --team NAME)
 
-HEAVY (full data - run on Modal: `modal run remote/modal_app.py`, see README):
-  data         synonyms -> prep -> block -> prefilter -> features2   (cached, incremental: finished
-               steps are skipped; --rebuild STEP forces one step and refreshes what follows)
-  model        train2 -> predict2 on the cached features   (work/stage2_report.md, output/)
+HEAVY (full data - run on Modal: `python remote/launch.py <task> --gpu-type H100`, see README):
+  data         synonyms -> prep -> block -> embblock -> prefilter -> features2 -> embed -> crossenc
+               (cached, incremental; --rebuild STEP forces one step and refreshes what follows)
+  model        level 1 -> level 2 -> decide -> predict on the cached features
+  stack        crossenc, then model in a fresh process
   full         data + model
-  synonyms | prep | block | prefilter | features2 | train2 | predict2   individual steps
 """
 from __future__ import annotations
 
