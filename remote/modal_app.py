@@ -71,6 +71,8 @@ DOWNLOADS = [
     ("work/synonyms.json", "work/synonyms.json"),
     ("work/stage2_report.md", "work/stage2_report.md"),
     ("work/diagnose_report.md", "work/diagnose_report.md"),
+    ("work/errors_report.md", "work/errors_report.md"),
+    ("work/errors_sample.tsv", "work/errors_sample.tsv"),
     ("work/selftrain_report.md", "work/selftrain_report.md"),
     ("output_selftrain/matching_results.tsv", "output_selftrain/matching_results.tsv"),
     ("output_selftrain/candidate_pairs.tsv", "output_selftrain/candidate_pairs.tsv"),

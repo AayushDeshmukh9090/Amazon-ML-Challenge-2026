@@ -322,7 +322,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["data", "model", "full",
                                     "synonyms", "prep", "block", "prefilter", "features2", "embed", "train2",
-                                    "predict2", "diagnose", "selftrain",
+                                    "predict2", "diagnose", "selftrain", "errors",
                                     "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
     ap.add_argument("--work-dir", default="work")
@@ -362,6 +362,7 @@ def main():
           "train2": lambda a: cmd_model(a, ("train2",)), "predict2": lambda a: cmd_model(a, ("predict2",)),
           "model": cmd_model,
           "diagnose": lambda a: __import__("diagnose").run(a.data_dir, a.work_dir, a.max_rounds),
+          "errors": lambda a: __import__("errors").run(a.data_dir, a.work_dir),
           "selftrain": lambda a: __import__("selftrain").run(a.data_dir, a.work_dir, a.out_dir, a.k_folds,
                                                              a.max_rounds, skip_sim=a.skip_sim)}
     if args.cmd in v2:
