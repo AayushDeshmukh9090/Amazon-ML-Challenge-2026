@@ -34,8 +34,8 @@ VOL_NAME = "amazon-ml-2026"
 CPU = 32            # cores: prep / blocking / features run in process pools
 MEMORY_MB = 131072  # 128 GB: ~12M-record token matrices + ~100M candidate pairs
 TIMEOUT_S = 12 * 3600   # ceiling, not cost; caches + checkpoints make a relaunch resume
-GPU = "L4"          # 24 GB NVIDIA GPU for XGBoost training/prediction (tasks in GPU_TASKS)
-GPU_TASKS = {"full", "model", "train2", "predict2", "diagnose", "selftrain"}
+GPU = os.environ.get("ER_GPU", "L4")   # NVIDIA GPU for XGBoost + transformer steps; ER_GPU=L40S at deploy time for ~2x
+GPU_TASKS = {"full", "data", "model", "train2", "predict2", "diagnose", "selftrain", "embblock", "embed", "crossenc"}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)

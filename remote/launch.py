@@ -7,6 +7,7 @@ on the deployed app, then exits.  The job runs on Modal until it finishes, whate
   python remote/launch.py model            # train + predict (GPU)
   python remote/launch.py data             # data preparation (CPU)
   python remote/launch.py full --gpu yes   # anything modal_app.py accepts; --extra "..." for flags
+  python remote/launch.py full --gpu-type L40S   # faster GPU for the transformer steps
   python remote/launch.py status           # is the last launched job still running / did it finish?
   python remote/launch.py download         # fetch outputs + reports once it finished
 Watch live logs:  modal app logs amazon-ml-2026-er
@@ -21,7 +22,7 @@ import modal
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 APP = "amazon-ml-2026-er"
-GPU_TASKS = {"full", "model", "train2", "predict2", "diagnose", "selftrain"}
+GPU_TASKS = {"full", "data", "model", "train2", "predict2", "diagnose", "selftrain", "embblock", "embed", "crossenc"}
 LAST = os.path.join(ROOT, "work", "last_modal_call.txt")
 
 
@@ -30,6 +31,7 @@ def main():
     ap.add_argument("task")
     ap.add_argument("--extra", default="")
     ap.add_argument("--gpu", default="auto", choices=["auto", "yes", "no"])
+    ap.add_argument("--gpu-type", default=None, help="Modal GPU type, e.g. L4 (default), L40S, A100")
     a = ap.parse_args()
 
     if a.task == "download":
@@ -51,7 +53,8 @@ def main():
         return
 
     # deploy the current local code (src/ is mounted into the image at deploy time)
-    subprocess.run(["modal", "deploy", os.path.join(HERE, "modal_app.py")], cwd=ROOT, check=True)
+    env = dict(os.environ, **({"ER_GPU": a.gpu_type} if a.gpu_type else {}))
+    subprocess.run(["modal", "deploy", os.path.join(HERE, "modal_app.py")], cwd=ROOT, check=True, env=env)
     use_gpu = a.gpu == "yes" or (a.gpu == "auto" and a.task in GPU_TASKS)
     fn = modal.Function.from_name(APP, "run_remote_gpu" if use_gpu else "run_remote")
     call = fn.spawn(a.task, a.extra)

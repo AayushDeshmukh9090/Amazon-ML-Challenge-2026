@@ -208,7 +208,7 @@ def cmd_features(args):
 # Every data step skips itself when its outputs are newer than its inputs, so re-running `data` or
 # `full` after a model-only change costs seconds.  `--rebuild STEP` forces one step; everything
 # downstream of it is then refreshed automatically because its inputs became newer.
-DATA_STEPS = ["synonyms", "prep", "block", "embblock", "prefilter", "features", "embed"]
+DATA_STEPS = ["synonyms", "prep", "block", "embblock", "prefilter", "features", "embed", "crossenc"]
 
 
 def _fresh(outputs, inputs):
@@ -317,6 +317,19 @@ def cmd_embed(args):
             return
 
 
+def cmd_crossenc(args):
+    """GPU: fine-tuned cross-encoder probabilities as stacked features (see crossenc.py)."""
+    import crossenc
+    if args.ce == "no":
+        return log("[crossenc] disabled (--ce no)")
+    if not crossenc.available():
+        return log("[crossenc] skipped: needs a GPU + torch/transformers (runs in `full`/GPU jobs)")
+    if not _forced(args, "crossenc") and crossenc.done(args.work_dir):
+        return _skip("crossenc", [crossenc.ce_path(args.work_dir, s) for s in ("train", "test")])
+    crossenc.run(args.data_dir, args.work_dir, model_name=args.ce_model, n_train=args.ce_train,
+                 epochs=args.ce_epochs, test_models=args.ce_test_models)
+
+
 def cmd_data(args):
     cmd_synonyms(args)
     cmd_prep(args)
@@ -325,6 +338,7 @@ def cmd_data(args):
     cmd_prefilter(args)
     cmd_features2(args)
     cmd_embed(args)
+    cmd_crossenc(args)
 
 
 def cmd_model(args, which=("train2", "predict2")):
@@ -340,7 +354,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["data", "model", "full",
                                     "synonyms", "prep", "block", "embblock", "prefilter", "features2", "embed",
-                                    "train2",
+                                    "crossenc", "train2",
                                     "predict2", "diagnose", "selftrain", "errors",
                                     "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
@@ -372,13 +386,19 @@ def main():
     ap.add_argument("--k-emb", type=int, default=5, help="embblock: S1 neighbours per S2/S3 record")
     ap.add_argument("--embed", default="auto", choices=["auto", "no"],
                     help="multilingual name-embedding features: auto = when a GPU is present")
+    ap.add_argument("--ce", default="auto", choices=["auto", "no"],
+                    help="cross-encoder features (crossenc.py): auto = when a GPU is present")
+    ap.add_argument("--ce-model", default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    ap.add_argument("--ce-train", type=int, default=3_000_000, help="cross-encoder: training pairs per fold")
+    ap.add_argument("--ce-epochs", type=int, default=1)
+    ap.add_argument("--ce-test-models", type=int, default=2, help="cross-encoder fold models averaged on test")
     ap.add_argument("--k-folds", type=int, default=3, help="stage-2 folds by S1 entity (level 1 and level 2)")
     ap.add_argument("--gbm", default="auto", choices=["auto", "xgb", "lgb"],
                     help="auto = XGBoost on GPU if one is present, else LightGBM on CPU")
     ap.add_argument("--budget", type=float, default=4.0, help="prefilter: kept pairs per S2/S3 record")
     args = ap.parse_args()
     v2 = {"synonyms": cmd_synonyms, "prep": cmd_prep, "block": cmd_block, "prefilter": cmd_prefilter,
-          "features2": cmd_features2, "embed": cmd_embed, "embblock": cmd_embblock, "data": cmd_data,
+          "features2": cmd_features2, "embed": cmd_embed, "embblock": cmd_embblock, "crossenc": cmd_crossenc, "data": cmd_data,
           "train2": lambda a: cmd_model(a, ("train2",)), "predict2": lambda a: cmd_model(a, ("predict2",)),
           "model": cmd_model,
           "diagnose": lambda a: __import__("diagnose").run(a.data_dir, a.work_dir, a.max_rounds),

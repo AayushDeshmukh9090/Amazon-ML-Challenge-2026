@@ -82,7 +82,7 @@ def run(data_dir, work_dir, max_rounds=3000, min_s1=50_000):
     rep = ["# Diagnose report", ""]
 
     # ------------------------------------------------------------------ train: OOF profile
-    X = load_features(work_dir, "train", use_emb)
+    X = load_features(work_dir, "train", use_emb, b.get("use_ce", False))
     y, n_true, s1_ids = _labels(data_dir, work_dir, X)
     s1, o = X["s1"].to_numpy(), X["o"].to_numpy()
     ck = load_prep(work_dir, "train", (1,), ["ckey"])["ckey"].to_numpy()
@@ -139,7 +139,7 @@ def run(data_dir, work_dir, max_rounds=3000, min_s1=50_000):
     del X
 
     # ------------------------------------------------------------------ test profile (incl. France)
-    Xt = load_features(work_dir, "test", use_emb)
+    Xt = load_features(work_dir, "test", use_emb, b.get("use_ce", False))
     p = np.mean([m.predict(Xt[b["feats"]]) for m in b["l1"]], axis=0)
     if b["use_l2"]:
         A = agg_features(Xt, p)

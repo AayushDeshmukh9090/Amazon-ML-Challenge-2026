@@ -60,7 +60,7 @@ def _best_f(s1, o, p, lab, n_true, ids):
 
 
 def simulate(data_dir, work_dir, b, max_rounds, rep, min_s1=50_000):
-    X = load_features(work_dir, "train", b.get("use_emb", False))
+    X = load_features(work_dir, "train", b.get("use_emb", False), b.get("use_ce", False))
     y, n_true, s1_ids = _labels(data_dir, work_dir, X)
     s1, o = X["s1"].to_numpy(), X["o"].to_numpy()
     ck = load_prep(work_dir, "train", (1,), ["ckey"])["ckey"].to_numpy()
@@ -106,7 +106,7 @@ def production(data_dir, work_dir, out_dir, b, n_folds, max_rounds, other_frac, 
     use_emb = b.get("use_emb", False)
     feats, feats2, backend = b["feats"], b["feats2"], b["l1"][0].backend
     # ---- 1. score test with the current models, derive pseudo-labels
-    Xt = load_features(work_dir, "test", use_emb)
+    Xt = load_features(work_dir, "test", use_emb, b.get("use_ce", False))
     st1, ot = Xt["s1"].to_numpy(), Xt["o"].to_numpy()
     p = np.mean([m.predict(Xt[feats]) for m in b["l1"]], axis=0)
     if b["use_l2"]:
@@ -129,7 +129,7 @@ def production(data_dir, work_dir, out_dir, b, n_folds, max_rounds, other_frac, 
     foldP, uP = tfold_all[st1[use]], tu_all[st1[use]]
 
     # ---- 2. level 1 on train + pseudo (same folds)
-    X = load_features(work_dir, "train", use_emb)
+    X = load_features(work_dir, "train", use_emb, b.get("use_ce", False))
     y, n_true, s1_ids = _labels(data_dir, work_dir, X)
     s1, o = X["s1"].to_numpy(), X["o"].to_numpy()
     fold_all, u_all = _folds(s1_ids, n_folds)

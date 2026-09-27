@@ -18,6 +18,8 @@ work_sample/
 output/*
 !output/.gitkeep
 output_sample/
+output_probe_*/
+output_selftrain/
 reports/eda/*.png
 reports/eda/*.tsv
 reports/eda_sample/
