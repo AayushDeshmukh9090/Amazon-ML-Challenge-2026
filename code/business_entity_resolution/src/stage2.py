@@ -282,8 +282,11 @@ def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
     s1 = X["s1"].to_numpy()
     o = X["o"].to_numpy()
     fold, u = fold_all[s1], u_all[s1]
-    feats = feature_columns(X)
-    log(f"train pairs {len(X):,} (pos {int(y.sum()):,}); features {len(feats)}; "
+    # cross-encoder columns go to LEVEL 2 only: level 1 stays identical to the previous run, so its
+    # fold checkpoints are reused (no 1.4 h retrain) and level 2 stacks the transformer on top
+    ce_cols = [c for c in X.columns if c.startswith("ce_")]
+    feats = [c for c in feature_columns(X) if c not in ce_cols]
+    log(f"train pairs {len(X):,} (pos {int(y.sum()):,}); features {len(feats)} (+{len(ce_cols)} cross-encoder at L2); "
         f"pair recall of scored pairs {y.sum() / len(ex):.4f}")
     from sklearn.metrics import average_precision_score, roc_auc_score
     lab = y.astype(bool)
@@ -292,8 +295,6 @@ def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
     ckpt = os.path.join(work_dir, "ckpt")
     sig = {"feat_mtime": os.path.getmtime(feat_path(work_dir, "train")), "use_emb": use_emb,
            "emb_mtime": os.path.getmtime(os.path.join(work_dir, "feat", "train_emb.parquet")) if use_emb else None,
-           "use_ce": use_ce,
-           "ce_mtime": os.path.getmtime(os.path.join(work_dir, "feat", "train_ce.parquet")) if use_ce else None,
            "folds": n_folds, "backend": backend,
            "max_rounds": max_rounds, "feats": feats, "params": gbm.XGB if backend == "xgb" else gbm.LGB}
     p1, m1, it1 = _kfold(backend, X, y, feats, fold, u, n_folds, max_rounds, "L1", ckpt, sig)
@@ -306,8 +307,10 @@ def train(data_dir, work_dir, n_folds=3, max_rounds=3000, backend="auto", **_):
     for c in AGG:
         X[c] = A[c].to_numpy()
     del A
-    feats2 = feats + AGG
-    p2, m2, it2 = _kfold(backend, X, y, feats2, fold, u, n_folds, max_rounds, "L2", ckpt, {**sig, "level": 2})
+    feats2 = feats + AGG + ce_cols
+    ce_sig = os.path.getmtime(os.path.join(work_dir, "feat", "train_ce.parquet")) if use_ce else None
+    p2, m2, it2 = _kfold(backend, X, y, feats2, fold, u, n_folds, max_rounds, "L2", ckpt,
+                         {**sig, "level": 2, "ce_mtime": ce_sig, "feats2": feats2})
     t2, sc2 = tune_threshold(s1, o, p2, lab, n_true)
     log(f"L2 OOF AUC {roc_auc_score(y, p2):.5f} AP {average_precision_score(y, p2):.5f}; "
         f"macro F0.5 {sc2:.5f} @ t={t2}")

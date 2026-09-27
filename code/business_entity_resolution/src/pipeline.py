@@ -327,7 +327,8 @@ def cmd_crossenc(args):
     if not _forced(args, "crossenc") and crossenc.done(args.work_dir):
         return _skip("crossenc", [crossenc.ce_path(args.work_dir, s) for s in ("train", "test")])
     crossenc.run(args.data_dir, args.work_dir, model_name=args.ce_model, n_train=args.ce_train,
-                 epochs=args.ce_epochs, test_models=args.ce_test_models)
+                 epochs=args.ce_epochs, test_models=args.ce_test_models, k_top=args.ce_k_top,
+                 p1_min=args.ce_p1_min, batch=args.ce_batch)
 
 
 def cmd_data(args):
@@ -358,7 +359,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["data", "model", "full",
                                     "synonyms", "prep", "block", "embblock", "prefilter", "features2", "embed",
-                                    "crossenc", "train2", "decide",
+                                    "crossenc", "stack", "train2", "decide",
                                     "predict2", "diagnose", "selftrain", "errors",
                                     "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
@@ -393,9 +394,13 @@ def main():
     ap.add_argument("--ce", default="auto", choices=["auto", "no"],
                     help="cross-encoder features (crossenc.py): auto = when a GPU is present")
     ap.add_argument("--ce-model", default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    ap.add_argument("--ce-train", type=int, default=3_000_000, help="cross-encoder: training pairs per fold")
+    ap.add_argument("--ce-train", type=int, default=2_000_000, help="cross-encoder: training pairs per fold")
     ap.add_argument("--ce-epochs", type=int, default=1)
-    ap.add_argument("--ce-test-models", type=int, default=2, help="cross-encoder fold models averaged on test")
+    ap.add_argument("--ce-batch", type=int, default=256)
+    ap.add_argument("--ce-k-top", type=int, default=1, help="cross-encoder scores each record's top-k pairs by p1 ...")
+    ap.add_argument("--ce-p1-min", type=float, default=0.05, help="... plus every pair with p1 >= this")
+    ap.add_argument("--ce-test-models", type=int, default=1,
+                    help="cross-encoder fold models averaged on test (1 = same distribution as the OOF scores)")
     ap.add_argument("--min-gain", type=float, default=2e-4,
                     help="decide: OOF gain a per-S1 rule needs over the global threshold (0 = take the best)")
     ap.add_argument("--k-folds", type=int, default=3, help="stage-2 folds by S1 entity (level 1 and level 2)")
@@ -408,6 +413,7 @@ def main():
           "train2": lambda a: cmd_model(a, ("train2",)), "predict2": lambda a: cmd_model(a, ("predict2",)),
           "model": cmd_model,
           "decide": lambda a: cmd_model(a, ("decide", "predict2")),
+          "stack": lambda a: (cmd_crossenc(a), cmd_model(a)),
           "diagnose": lambda a: __import__("diagnose").run(a.data_dir, a.work_dir, a.max_rounds),
           "errors": lambda a: __import__("errors").run(a.data_dir, a.work_dir),
           "selftrain": lambda a: __import__("selftrain").run(a.data_dir, a.work_dir, a.out_dir, a.k_folds,
