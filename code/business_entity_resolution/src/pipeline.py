@@ -328,7 +328,7 @@ def cmd_crossenc(args):
         return _skip("crossenc", [crossenc.ce_path(args.work_dir, s) for s in ("train", "test")])
     crossenc.run(args.data_dir, args.work_dir, model_name=args.ce_model, n_train=args.ce_train,
                  epochs=args.ce_epochs, test_models=args.ce_test_models, k_top=args.ce_k_top,
-                 p1_min=args.ce_p1_min, batch=args.ce_batch)
+                 p1_min=args.ce_p1_min, batch=args.ce_batch, n_continue=args.ce_continue)
 
 
 def cmd_data(args):
@@ -397,6 +397,9 @@ def main():
     ap.add_argument("--ce-train", type=int, default=2_000_000, help="cross-encoder: training pairs per fold")
     ap.add_argument("--ce-epochs", type=int, default=1)
     ap.add_argument("--ce-batch", type=int, default=256)
+    ap.add_argument("--ce-continue", type=int, default=0,
+                    help="continue fine-tuning the saved cross-encoder fold models on this many NEW pairs per fold "
+                         "(use with --rebuild crossenc)")
     ap.add_argument("--ce-k-top", type=int, default=1, help="cross-encoder scores each record's top-k pairs by p1 ...")
     ap.add_argument("--ce-p1-min", type=float, default=0.05, help="... plus every pair with p1 >= this")
     ap.add_argument("--ce-test-models", type=int, default=1,

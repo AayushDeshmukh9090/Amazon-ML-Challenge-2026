@@ -130,12 +130,12 @@ def _loader(ds, tok, max_len, batch, shuffle, workers):
                                        persistent_workers=False, pin_memory=workers > 0)
 
 
-def fine_tune(tok, model, dev, ta, tb, y, epochs=1, batch=256, lr=5e-5, max_len=96, workers=8, log=log):
+def fine_tune(tok, model, dev, ta, tb, y, epochs=1, batch=256, lr=5e-5, max_len=96, workers=12, log=log):
     import torch
     model.to(dev).train()
     dl = _loader(_Pairs(ta, tb, y.astype(np.float32)), tok, max_len, batch, True, workers)
     steps = max(1, epochs * len(dl))
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    opt = torch.optim.AdamW([q for q in model.parameters() if q.requires_grad], lr=lr, weight_decay=0.01)
     warm = max(1, int(0.05 * steps))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min((s + 1) / warm, max(0.0, (steps - s) / (steps - warm + 1))))
     lossf = torch.nn.BCEWithLogitsLoss()
@@ -162,7 +162,7 @@ def fine_tune(tok, model, dev, ta, tb, y, epochs=1, batch=256, lr=5e-5, max_len=
     return model
 
 
-def score(tok, model, dev, ta, tb, batch=1024, max_len=96, workers=8, log=log):
+def score(tok, model, dev, ta, tb, batch=1024, max_len=96, workers=12, log=log):
     """Probabilities for the pairs, batched by text length (less padding), original order kept."""
     import torch
     model.to(dev).eval()
@@ -215,7 +215,10 @@ def _write(work_dir, split, F):
 
 
 def run(data_dir, work_dir, model_name=MODEL, n_train=3_000_000, epochs=1, k_top=2, p1_min=0.02,
-        batch=256, lr=5e-5, max_len=96, test_models=2, workers=8):
+        batch=256, lr=5e-5, max_len=96, test_models=2, workers=12, n_continue=0):
+    """n_continue > 0: CONTINUE fine-tuning the saved fold models on that many NEW training pairs per
+    fold (pairs not used by the first round), then re-score OOF + test.  Word embeddings are frozen
+    in this round (faster steps; the pretrained vocabulary is already adapted)."""
     import torch
     from block import true_pairs
     from stage2 import _folds, feat_path
@@ -225,6 +228,9 @@ def run(data_dir, work_dir, model_name=MODEL, n_train=3_000_000, epochs=1, k_top
     os.makedirs(ce_dir, exist_ok=True)
     sig = {"feat_bytes": os.path.getsize(feat_path(work_dir, "train")), "model": model_name, "n_train": n_train,
            "epochs": epochs, "k_top": k_top, "p1_min": p1_min, "lr": lr, "max_len": max_len}
+    base_sig = dict(sig)
+    if n_continue:
+        sig["continue"] = n_continue
 
     # ---- train split: labels, selection, 2 folds by S1 entity
     X = pd.read_parquet(feat_path(work_dir, "train"), columns=["s1", "o", "p1"])
@@ -246,6 +252,10 @@ def run(data_dir, work_dir, model_name=MODEL, n_train=3_000_000, epochs=1, k_top
     p_tr = np.full(len(X), np.nan, np.float32)
     models = []
     rng = np.random.default_rng(0)
+    used = {}                                   # first-round training sample per fold (same rng sequence)
+    for f in (0, 1):
+        tr_all = np.where(sel & (fold != f))[0]
+        used[f] = np.sort(rng.choice(tr_all, n_train, replace=False)) if len(tr_all) > n_train else tr_all
     for f in (0, 1):
         mdir, sp = os.path.join(ce_dir, f"fold{f}"), os.path.join(ce_dir, f"oof{f}.npy")
         meta = os.path.join(ce_dir, f"fold{f}.json")
@@ -255,13 +265,25 @@ def run(data_dir, work_dir, model_name=MODEL, n_train=3_000_000, epochs=1, k_top
             models.append(mdir)
             log(f"fold {f}: resumed from checkpoint")
             continue
-        tr = np.where(sel & (fold != f))[0]
-        if len(tr) > n_train:
-            tr = np.sort(rng.choice(tr, n_train, replace=False))
         tok, model, dev = _load(model_name)
-        log(f"fold {f}: fine-tuning on {len(tr):,} pairs (pos {int(y[tr].sum()):,}) on {dev}")
-        model = fine_tune(tok, model, dev, t1[s1[tr]], to[o[tr]], y[tr], epochs=epochs, batch=batch, lr=lr,
-                          max_len=max_len, workers=workers)
+        prev_ok = os.path.exists(meta) and json.load(open(meta)) == base_sig and os.path.isdir(mdir)
+        if n_continue and prev_ok:
+            model = type(model).from_pretrained(mdir)             # first-round fine-tuned model
+            rest = np.setdiff1d(np.where(sel & (fold != f))[0], used[f])
+            rng2 = np.random.default_rng(100 + f)
+            tr = np.sort(rng2.choice(rest, min(n_continue, len(rest)), replace=False))
+            for prm in model.base_model.embeddings.word_embeddings.parameters():
+                prm.requires_grad = False
+            log(f"fold {f}: CONTINUING the fine-tuned model on {len(tr):,} new pairs (pos {int(y[tr].sum()):,})")
+            model = fine_tune(tok, model, dev, t1[s1[tr]], to[o[tr]], y[tr], epochs=1, batch=batch, lr=lr * 0.6,
+                              max_len=max_len, workers=workers)
+        else:
+            if n_continue:
+                log(f"fold {f}: no first-round model to continue - training from scratch")
+            tr = used[f]
+            log(f"fold {f}: fine-tuning on {len(tr):,} pairs (pos {int(y[tr].sum()):,}) on {dev}")
+            model = fine_tune(tok, model, dev, t1[s1[tr]], to[o[tr]], y[tr], epochs=epochs, batch=batch, lr=lr,
+                              max_len=max_len, workers=workers)
         log(f"fold {f}: scoring {len(ev):,} held-out pairs")
         p = score(tok, model, dev, t1[s1[ev]], to[o[ev]], max_len=max_len, workers=workers)
         p_tr[ev] = p
