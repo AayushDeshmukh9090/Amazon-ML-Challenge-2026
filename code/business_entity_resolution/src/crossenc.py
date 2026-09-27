@@ -293,6 +293,9 @@ def run(data_dir, work_dir, model_name=MODEL, n_train=3_000_000, epochs=1, k_top
         model = type(model).from_pretrained(mdir)          # the fine-tuned fold model
         log(f"test: scoring with fold-{f} model")
         ps.append(score(tok, model, dev, a, b, max_len=max_len, workers=workers))
+        del model
+        if dev == "cuda":                                   # hand the GPU back to XGBoost (same process)
+            torch.cuda.empty_cache()
     p_te = np.full(len(Xt), np.nan, np.float32)
     p_te[idx] = np.mean(ps, axis=0)
     _write(work_dir, "test", _features(Xt, p_te))
