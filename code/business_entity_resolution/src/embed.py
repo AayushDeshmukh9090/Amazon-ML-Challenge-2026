@@ -83,13 +83,9 @@ def encode_unique(model, names: list[str], batch=1024, chunk=500_000) -> tuple[n
 
 def run(work_dir, split):
     from stage2 import _best_other, feat_path   # reuse the vectorised group helpers
-    model, dev = _encoder()
-    name = "FAKE test encoder" if os.environ.get("ER_FAKE_EMB") == "1" else MODEL
-    log(f"{split}: embedding names with {name} on {dev}")
-    n1 = load_prep(work_dir, split, (1,), ["name"])["name"].tolist()
-    no = load_prep(work_dir, split, (2, 3), ["name"])["name"].tolist()
-    codes, U = encode_unique(model, n1 + no)
-    c1, co = codes[:len(n1)], codes[len(n1):]
+    from embblock import get_embeddings                 # cached per unique name (shared with embblock)
+    codes, U, n1 = get_embeddings(work_dir, split)
+    c1, co = codes[:n1], codes[n1:]
     pairs = pd.read_parquet(feat_path(work_dir, split), columns=["s1", "o"])
     s1, o = pairs["s1"].to_numpy(), pairs["o"].to_numpy()
     cos = np.empty(len(pairs), np.float32)

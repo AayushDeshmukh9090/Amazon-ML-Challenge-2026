@@ -113,6 +113,32 @@ def _dba_best(na, nb):
     return out
 
 
+def _char_feats(ca, cb):
+    """Typo-robust name similarity. The dataset's name noise is character shuffles / insertions
+    ('Cmogpurre'~'Computer', 'Atsociatieon'~'Association', 'Ifnmormation'~'Information') that
+    token or edit-distance scores miss; letter multisets and per-token sorted letters survive them."""
+    n = len(ca)
+    bag = np.zeros(n, np.float32)
+    tok_anagram = np.zeros(n, np.float32)
+    tok_sorted_best = np.zeros(n, np.float32)
+    initials_eq = np.zeros(n, np.float32)
+    for k, (a, b) in enumerate(zip(ca, cb)):
+        ta, tb = a.split(), b.split()
+        if not ta or not tb:
+            continue
+        ca_, cb_ = Counter(a.replace(" ", "")), Counter(b.replace(" ", ""))
+        tot = max(sum(ca_.values()), sum(cb_.values()), 1)
+        bag[k] = sum((ca_ & cb_).values()) / tot
+        sa = ["".join(sorted(t)) for t in ta]
+        sb = ["".join(sorted(t)) for t in tb]
+        setb = set(sb)
+        tok_anagram[k] = sum(x in setb for x in sa) / len(sa)
+        tok_sorted_best[k] = float(np.mean([max(fuzz.ratio(x, y) for y in sb) for x in sa]))
+        initials_eq[k] = float(len(ta) >= 2 and [t[0] for t in ta] == [t[0] for t in tb])
+    return {"char_bag": bag, "tok_anagram": tok_anagram, "tok_sorted_ratio": tok_sorted_best,
+            "initials_eq": initials_eq}
+
+
 def pair_features(A: pd.DataFrame, B: pd.DataFrame, idf_n, dn, idf_a, da) -> dict:
     F = {}
     na, nb = A["n_name"].tolist(), B["n_name"].tolist()
@@ -154,6 +180,7 @@ def pair_features(A: pd.DataFrame, B: pd.DataFrame, idf_n, dn, idf_a, da) -> dic
     F["ns_len_ratio"] = np.array([min(len(x), len(y)) / max(len(x), len(y), 1) for x, y in zip(nsa, nsb)],
                                  np.float32)
     F["dba_best"] = _dba_best(A["name"].tolist(), B["name"].tolist())
+    F.update(_char_feats(ca, cb))
     F.update(_tok_feats([set(x.split()) for x in ca], [set(x.split()) for x in cb], idf_n, dn, "ntok"))
     F.update(_tok_feats([set(x.split()) for x in aa], [set(x.split()) for x in ab], idf_a, da, "atok"))
     F["addr_empty_a"] = np.array([not x for x in aa], np.float32)
@@ -220,7 +247,7 @@ def build(pairs: pd.DataFrame, P1: pd.DataFrame, PO: pd.DataFrame, jobs: int, ch
     X = pd.concat(parts, ignore_index=True)
     X.insert(0, "o", oi)
     X.insert(0, "s1", s1i)
-    for c in ("score", "r_rev", "r_fwd", "p1"):
+    for c in ("score", "r_rev", "r_fwd", "p1", "r_emb", "emb_score"):
         if c in pairs:
             X[c] = pairs[c].values.astype(np.float32)
     X["is_s3"] = PO["entity_id"].str.startswith("S3").values[oi].astype(np.float32)

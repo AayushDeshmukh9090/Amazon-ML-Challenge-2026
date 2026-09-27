@@ -208,7 +208,7 @@ def cmd_features(args):
 # Every data step skips itself when its outputs are newer than its inputs, so re-running `data` or
 # `full` after a model-only change costs seconds.  `--rebuild STEP` forces one step; everything
 # downstream of it is then refreshed automatically because its inputs became newer.
-DATA_STEPS = ["synonyms", "prep", "block", "prefilter", "features", "embed"]
+DATA_STEPS = ["synonyms", "prep", "block", "embblock", "prefilter", "features", "embed"]
 
 
 def _fresh(outputs, inputs):
@@ -253,6 +253,23 @@ def cmd_block(args):
                                      args.df_frac)
         if split == "train":
             recall_report(args.data_dir, args.work_dir, s1, oth, cands, args.k_rev, args.k_fwd)
+
+
+def cmd_embblock(args):
+    """GPU: add multilingual-embedding nearest neighbours to the candidate set (see embblock.py)."""
+    import embblock
+    import embed
+    if args.embed == "no":
+        return log("[embblock] disabled (--embed no)")
+    if not embed.available():
+        return log("[embblock] skipped: needs a GPU (runs in `full`/GPU jobs)")
+    for split in args.splits.split(","):
+        if not _forced(args, "embblock") and embblock.done(args.work_dir, split):
+            _skip(f"embblock {split}", [os.path.join(args.work_dir, "cands", f"{split}.parquet")])
+            continue
+        C = embblock.run(args.work_dir, split, k=args.k_emb)
+        if split == "train":
+            embblock.recall_gain(args.data_dir, args.work_dir, C)
 
 
 def cmd_prefilter(args):
@@ -304,6 +321,7 @@ def cmd_data(args):
     cmd_synonyms(args)
     cmd_prep(args)
     cmd_block(args)
+    cmd_embblock(args)
     cmd_prefilter(args)
     cmd_features2(args)
     cmd_embed(args)
@@ -321,7 +339,8 @@ def cmd_model(args, which=("train2", "predict2")):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["data", "model", "full",
-                                    "synonyms", "prep", "block", "prefilter", "features2", "embed", "train2",
+                                    "synonyms", "prep", "block", "embblock", "prefilter", "features2", "embed",
+                                    "train2",
                                     "predict2", "diagnose", "selftrain", "errors",
                                     "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
@@ -350,6 +369,7 @@ def main():
     ap.add_argument("--train-frac", type=float, default=0.25, help="share of S1 entities used per fold model")
     ap.add_argument("--max-rounds", type=int, default=3000)
     ap.add_argument("--skip-sim", action="store_true", help="selftrain: skip the labelled simulation")
+    ap.add_argument("--k-emb", type=int, default=5, help="embblock: S1 neighbours per S2/S3 record")
     ap.add_argument("--embed", default="auto", choices=["auto", "no"],
                     help="multilingual name-embedding features: auto = when a GPU is present")
     ap.add_argument("--k-folds", type=int, default=3, help="stage-2 folds by S1 entity (level 1 and level 2)")
@@ -358,7 +378,7 @@ def main():
     ap.add_argument("--budget", type=float, default=4.0, help="prefilter: kept pairs per S2/S3 record")
     args = ap.parse_args()
     v2 = {"synonyms": cmd_synonyms, "prep": cmd_prep, "block": cmd_block, "prefilter": cmd_prefilter,
-          "features2": cmd_features2, "embed": cmd_embed, "data": cmd_data,
+          "features2": cmd_features2, "embed": cmd_embed, "embblock": cmd_embblock, "data": cmd_data,
           "train2": lambda a: cmd_model(a, ("train2",)), "predict2": lambda a: cmd_model(a, ("predict2",)),
           "model": cmd_model,
           "diagnose": lambda a: __import__("diagnose").run(a.data_dir, a.work_dir, a.max_rounds),

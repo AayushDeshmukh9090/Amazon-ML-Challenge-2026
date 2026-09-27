@@ -25,7 +25,7 @@ from prep import load_prep
 
 T0 = time.time()
 _G: dict = {}
-CHEAP = ["score", "r_rev", "r_fwd", "o_max", "o_ratio", "o_n", "s1_max", "s1_gap", "s1_n",
+CHEAP = ["score", "r_rev", "r_fwd", "r_emb", "emb_score", "o_max", "o_ratio", "o_n", "s1_max", "s1_gap", "s1_n",
          "core_tset", "core_ratio", "addr_tset", "addr_ratio", "hn_eq", "core_tset_gap_o", "addr_tset_gap_o",
          "core_tset_gap_s1", "addr_tset_gap_s1"]
 LGB = dict(objective="binary", learning_rate=0.1, num_leaves=63, min_child_samples=200, feature_fraction=0.9,
@@ -52,6 +52,9 @@ def cheap_features(work_dir, split, cands: pd.DataFrame, jobs: int, chunk=400_00
     X = cands.copy()
     for c in ("r_rev", "r_fwd"):
         X[c] = X[c].astype(np.float32)
+    if "r_emb" not in X:                      # candidates built without the embedding-neighbour step
+        X["r_emb"], X["emb_score"] = np.float32(255), np.float32(-1)
+    X["r_emb"] = X["r_emb"].astype(np.float32)
     go, gs = X.groupby("o")["score"], X.groupby("s1")["score"]
     X["o_max"] = go.transform("max").astype(np.float32)
     X["o_ratio"] = (X["score"] / X["o_max"].clip(lower=1e-6)).astype(np.float32)
@@ -140,7 +143,7 @@ def run(data_dir, work_dir, jobs=None, budget=4.0, k_o=5, k_s1=15, sample=6_000_
             p = b["model"].predict(X[CHEAP], num_threads=jobs)
             keep = _keep_mask(p, _ranks(X, p), b["tau"], b["k_o"], b["k_s1"])
             log(f"prefilter test: kept {keep.sum():,} of {len(X):,} pairs")
-        out = X.loc[keep, ["s1", "o", "score", "r_rev", "r_fwd"]].copy()
+        out = X.loc[keep, ["s1", "o", "score", "r_rev", "r_fwd", "r_emb", "emb_score"]].copy()
         out["p1"] = p[keep].astype(np.float32)
         out.to_parquet(os.path.join(work_dir, "cands", f"{split}_pruned.parquet"), index=False)
         del X
