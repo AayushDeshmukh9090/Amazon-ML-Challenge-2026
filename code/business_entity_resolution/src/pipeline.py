@@ -331,6 +331,15 @@ def cmd_crossenc(args):
                  p1_min=args.ce_p1_min, batch=args.ce_batch, n_continue=args.ce_continue)
 
 
+def cmd_stack(args):
+    """crossenc, then the model part in a FRESH process (the GPU memory the transformer held is freed)."""
+    import subprocess
+    cmd_crossenc(args)
+    rc = subprocess.run([sys.executable, "-u", os.path.abspath(__file__), "model"] + sys.argv[2:]).returncode
+    if rc:
+        sys.exit(rc)
+
+
 def cmd_data(args):
     cmd_synonyms(args)
     cmd_prep(args)
@@ -416,7 +425,7 @@ def main():
           "train2": lambda a: cmd_model(a, ("train2",)), "predict2": lambda a: cmd_model(a, ("predict2",)),
           "model": cmd_model,
           "decide": lambda a: cmd_model(a, ("decide", "predict2")),
-          "stack": lambda a: (cmd_crossenc(a), cmd_model(a)),
+          "stack": cmd_stack,
           "diagnose": lambda a: __import__("diagnose").run(a.data_dir, a.work_dir, a.max_rounds),
           "errors": lambda a: __import__("errors").run(a.data_dir, a.work_dir),
           "selftrain": lambda a: __import__("selftrain").run(a.data_dir, a.work_dir, a.out_dir, a.k_folds,
