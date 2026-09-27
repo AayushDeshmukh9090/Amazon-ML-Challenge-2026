@@ -349,7 +349,7 @@ def cmd_model(args, which=("train2", "predict2")):
         which = tuple(which) + ("decide",)
     if "decide" in which:
         import decide2
-        decide2.run(args.data_dir, args.work_dir)
+        decide2.run(args.data_dir, args.work_dir, min_gain=args.min_gain)
     if "predict2" in which:
         stage2.predict(args.work_dir, args.out_dir)
 
@@ -396,6 +396,8 @@ def main():
     ap.add_argument("--ce-train", type=int, default=3_000_000, help="cross-encoder: training pairs per fold")
     ap.add_argument("--ce-epochs", type=int, default=1)
     ap.add_argument("--ce-test-models", type=int, default=2, help="cross-encoder fold models averaged on test")
+    ap.add_argument("--min-gain", type=float, default=2e-4,
+                    help="decide: OOF gain a per-S1 rule needs over the global threshold (0 = take the best)")
     ap.add_argument("--k-folds", type=int, default=3, help="stage-2 folds by S1 entity (level 1 and level 2)")
     ap.add_argument("--gbm", default="auto", choices=["auto", "xgb", "lgb"],
                     help="auto = XGBoost on GPU if one is present, else LightGBM on CPU")

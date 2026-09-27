@@ -1,110 +1,169 @@
 # Methodology: Business Entity Resolution (Amazon ML Challenge 2026)
 
-> Draft generated alongside the code. Fill the `TODO` numbers from
-> `work/train_summary.json` and `reports/eda/eda_report.md` after the final run.
-> If the official `Documentation_template.md` has different headings, paste
-> these sections under them.
-
-**Team:** TODO  **Final public LB F0.5:** TODO  **OOF (5-fold) macro F0.5:** TODO
+**Team:** TODO  **Final leaderboard macro F0.5:** TODO (best so far 0.972)
+**Train out-of-fold macro F0.5:** 0.98367 (3-fold by S1 entity, all 1,788,190 training S1 entities, singletons included)
 
 ## 1. Methodology overview
 
-A classic ER pipeline with four stages, each tuned against the leaderboard metric
-(macro F0.5 per Source-1 entity, singletons included):
+A large-scale entity resolution pipeline in two separately cached parts:
 
-1. **Normalisation**: country-agnostic text canonicalisation (transliteration to ASCII,
-   legal-form and address-abbreviation tables covering US, India and France conventions,
-   core-name extraction, phonetic skeleton, postal-code extraction, DBA splitting).
-2. **Blocking / candidate generation**: union of six complementary blockers inside
-   country blocks → `candidate_pairs.tsv` (exactly the pairs the model scores).
-3. **Pairwise matching model**: LightGBM binary classifier on ~90 engineered features,
-   trained with 5-fold GroupKFold (groups = S1 entity), final model = 3-seed bag.
-4. **Decision layer**: probabilities → per-entity match set chosen to maximise
-   macro F0.5 (threshold vs. expected-F0.5 rule, optional one-to-one constraint), tuned
-   on out-of-fold predictions.
+- **Data part:** normalisation → token and embedding candidate search → learned pre-filter →
+  pair features. Everything is cached, so a model change never recomputes it.
+- **Model part:** two-level gradient boosting, validated out-of-fold by S1 entity →
+  one-to-one assignment → decision tuned for the exact metric.
 
-No external data, APIs, geocoders or pretrained entity databases are used. The only
-models are LightGBM (MIT) and scikit-learn TF-IDF (BSD); no neural model is required.
+The four stages:
+
+1. **Normalisation** (country-agnostic):
+   - Unicode → ASCII transliteration.
+   - Legal-form and address-abbreviation tables that merge US, Indian and French conventions.
+   - US state names mapped only when they are a whole address component.
+   - Core name (legal words and noise removed), phonetic skeleton, house number, numbers,
+     postal code, and splitting of "DBA / formerly" name variants.
+   - Token synonyms learned from training pairs: Indic-script transliterations, state
+     names in Indic scripts, city aliases. A mapping needs at least 15 occurrences and must
+     look like a spelling variant, which rejects place swaps such as richmond→county.
+2. **Candidate generation**, within each country block:
+   - An IDF-weighted inverted index over hashed name/address tokens, name bigrams and
+     numbers, searched both ways: each S2/S3 record's top 10 S1, and each S1's top 20 records.
+   - Plus each S2/S3 record's 5 nearest S1 names by multilingual sentence-embedding cosine.
+   - A cheap LightGBM pre-filter then keeps about 2.5 pairs per record.
+3. **Matching model:**
+   - Level 1: XGBoost (CUDA) on 136 pair features.
+   - Level 2: XGBoost that also sees the level-1 out-of-fold probabilities aggregated over
+     the record's competing S1 entities and over the S1 entity's other candidates.
+4. **Decision:**
+   - Each S2/S3 record is kept only for its most probable S1 (ground truth is one-to-one
+     from that side).
+   - Then a probability threshold tuned for the exact macro F0.5 on out-of-fold
+     predictions. Per-S1 rules were also compared (Section 5).
+
+No external data, APIs or geocoders are used. Models used:
+
+| Component | License | Size |
+|---|---|---|
+| XGBoost | Apache-2.0 | — |
+| LightGBM | MIT | — |
+| `paraphrase-multilingual-MiniLM-L12-v2` sentence embedding (applied to the provided names only) | Apache-2.0 | ~118M parameters |
 
 ## 2. EDA findings that shaped the design
-(from `reports/eda/eda_report.md`)
 
-- Dataset sizes: TODO. Singleton rate: TODO% (= score of an all-empty submission).
-- Match-count distribution: TODO. Each S2/S3 id matches at most one S1 entity: TODO (yes/no), which motivates the one-to-one filter.
-- Country agreement on matched pairs: TODO%, so country is used as a hard block key (open set; France is handled by the same code).
-- Postal code agreement when both present: TODO%. Hard negatives with identical names (chains): TODO%, so address features are decisive.
-- Name-only char-TF-IDF top-k recall: k=5 TODO, 10 TODO, 20 TODO, 50 TODO.
+- **Scale.** Train has about 2.2M S1 entities and about 10.3M S2+S3 records. Test has 1.73M S1
+  (India 46.8%, US 38.3%, France 15.0%) and about 10M S2+S3 records. This rules out all-pairs
+  comparison, so blocking is exact but sparse, and every step is chunked and parallel.
+- **One-to-one.** Each S2/S3 record belongs to at most one S1 entity, so the decision is
+  one-to-one from the record side.
+- **Matches per entity.** Most S1 entities have several matches (3.46 true matches per S1 on
+  average), and only about 5.6% are singletons. An empty prediction therefore scores 0 for
+  94% of entities.
+- **Distractor density.** Train has fewer S2+S3 records per S1 than test (4.68 vs 5.75).
+  Removing 19% of train S1 entities, whose records stay behind as unmatched distractors, gives
+  train the same distractor density as test, so thresholds tuned on train transfer.
+- **Indic scripts.** Many Indian records carry the name in an Indic script with a truncated
+  address, which motivates learned transliteration synonyms and multilingual embeddings.
+- **Unseen country.** France appears only in test. Country is used as an open-set block key
+  and is never a model feature.
 
 ## 3. Candidate generation / blocking
 
-All blockers run **within the country block** (country string lower-cased; an unseen label
-simply forms its own block):
+| step | what | train result |
+|---|---|---|
+| token index | IDF-weighted overlap of hashed name/address tokens; per-token document-frequency cap = max(3000, 0.004 × block size); reverse top-10 + forward top-20 | pair recall 0.9809, 114.8M pairs |
+| embedding neighbours | top-5 S1 names per S2/S3 record by MiniLM cosine (GPU) | recall alone 0.5328; union 0.9842 (+0.0033), 157.8M pairs |
+| learned pre-filter | LightGBM on cheap scores and ranks; keeps each record's top pairs above a tuned cut-off | 25.4M pairs (2.46 per record), pair recall 0.9837 |
 
-| id | blocker | k |
-|----|---------|---|
-| A | char 2–4-gram TF-IDF cosine on normalised name | 25 |
-| B | char 2–4-gram TF-IDF on core name + normalised address | 25 |
-| C | word TF-IDF on normalised address (renamed / DBA businesses) | 10 |
-| D | reverse: each S2/S3 record → its top-5 S1 names (crowded neighbourhoods) | 5 |
-| E | exact phonetic core-name key (transliteration variants) | block ≤ 30 |
-| F | exact (postal code, first core-name token) | block ≤ 30 |
-
-TF-IDF vocabularies are fitted on all records of the split (no labels). Top-k search
-is an exact chunked sparse-dense product (no approximate index needed at this scale).
-
-Train blocking quality: pair recall TODO, avg candidates per S1 TODO, reduction ratio TODO.
-Per-blocker recall and unique contribution are logged by `pipeline.py train`.
+A perfect matcher on the scored pairs would reach macro F0.5 0.9946. `candidate_pairs.tsv`
+contains exactly the pairs the model scores.
 
 ## 4. Model architecture and feature engineering
 
-**Features (≈90)**, all country-agnostic (the country label is never a feature):
+**Pair features (136).** All are country-agnostic.
 
-- *Name strings*: rapidfuzz ratio / partial / token-sort / token-set / WRatio / Jaro-Winkler
-  on the normalised name and on the core name (legal forms removed), normalised Levenshtein,
-  phonetic-skeleton ratios, exact core/phonetic/no-space equality, acronym match,
-  first-token equality, length and token-count differences, best score across DBA variants,
-  legal-form conflict.
-- *TF-IDF cosines*: char name, word name, char name+address, word address.
-- *IDF-weighted token overlap*, for names and addresses: Jaccard, IDF-weighted Jaccard,
-  max IDF of a shared token, and the total and max IDF of tokens found on only one side.
-  A rare token that appears on one side only is strong evidence of a different business.
-- *Address*: fuzzy scores, empty flags, length ratio, postal code both-present / equal /
-  3-digit-prefix equal, house-number Jaccard / conflict, number agreement inside names.
-- *Name frequency*: log-count of the core name in S1 and in S2+S3 (chains, generic names).
-- *Context features* (key for precision): for 5 key scores, rank and gap-to-best of
-  the pair among the S1 entity's candidates, rank and gap among the candidate record's
-  competing S1 entities, second-best score in the S1 group, and candidate-set sizes.
-- Source flag (S2 vs S3).
+- **Name strings:** rapidfuzz ratio, partial, token-sort, token-set, WRatio and Jaro-Winkler on
+  the normalised, core and phonetic names; DBA best variant; legal-form conflict.
+- **Script features:** the script of each side, script mismatch, and phonetic-skeleton
+  prefix/length.
+- **Character-level typo features:** character bag overlap, token anagram, sorted-token
+  ratio, and initials equality.
+- **IDF-weighted token overlap** for names and addresses: Jaccard, weighted Jaccard, and the
+  rarest shared token. Rare tokens present on only one side are strong evidence of a
+  different business.
+- **Address and numbers:** house number (equal, Levenshtein, log gap), number Jaccard,
+  postal code, and empty-address flags.
+- **Frequency:** how often the core name appears among S1 and among S2+S3 (chains and
+  generic names).
+- **Context:** for key scores, the pair's rank, gap to the best, and best competing value
+  among the record's candidate S1 entities and among the S1's candidate records; candidate
+  counts.
+- **Embeddings:** name-embedding cosine with the same rank, gap and best-other context.
 
-**Model**: LightGBM (`binary`, lr 0.03, 63 leaves, feature/bagging fraction 0.7/0.8,
-L2 = 5), early-stopped per fold, then refit on all pairs with 1.1× the mean best iteration,
-averaged over 3 seeds.
+**Model.**
+
+- XGBoost on GPU: eta 0.08, loss-guided trees with 127 leaves, subsample and column sample
+  0.7, λ = 10, early stopping.
+- 3 folds by S1 entity (hash), giving out-of-fold probabilities for every training pair.
+  Test is scored by the average of the fold models.
+- Level 2 adds 13 aggregates of the level-1 out-of-fold probabilities: rank, gap and best
+  other within the record and within the S1 entity, number of strong candidates, and the
+  one-to-one winner flag. This lifts OOF macro F0.5 from 0.98314 to 0.98367 (AUC 0.99960 →
+  0.99965).
 
 ## 5. Decision layer (optimising macro F0.5)
 
-For one entity with truth set T and prediction P, F0.5 = 1.25·|P∩T| / (0.25·|T| + |P|),
-and an empty prediction scores 1 exactly when T is empty. Two rules are compared on OOF:
+Per entity, F0.5 = 1.25·|P∩T| / (0.25·|T| + |P|). An empty P scores 1 only when T is empty.
+Rules compared on out-of-fold probabilities with the exact metric:
 
-- **Threshold** t (grid then refinement).
-- **Expected-F0.5**: sort the candidates by p, then for every prefix size k (including k = 0,
-  worth ∏(1−p)) estimate E[F0.5] by Monte Carlo under independent Bernoulli(p) labels and
-  pick the argmax, with an optional conservativeness bias.
+| rule | OOF macro F0.5 |
+|---|---|
+| one-to-one + global threshold t = 0.70 | 0.98367 |
+| one-to-one + two thresholds (S1's top pick at p ≥ 0.50, others at p ≥ 0.74) | 0.98384 |
+| one-to-one + expected-F0.5 prefix per S1 (argmax_k 1.25·Σp_1..k / (0.25·Σp + k); empty if ∏(1−p) + 0.05 is larger) | 0.98385 |
 
-Both can run with a **one-to-one filter** (each S2/S3 record is kept only for its most
-probable S1 entity) when the EDA shows that ground truth is one-to-one. Chosen rule: TODO.
+Per-country thresholds are adopted only when they beat the global threshold on that country
+by more than 3·10⁻⁴; none did. France uses the global rule. Chosen rule: TODO (the threshold
+unless the expected-F0.5 rule is forced with `--min-gain 0`).
 
 ## 6. Validation
 
-- 5-fold GroupKFold by S1 entity; OOF macro F0.5 over **all** train S1 entities
-  (including those with no candidates): TODO. Breakdown: singleton TODO / one-match TODO / multi TODO.
-- Blocking ceiling (a perfect matcher restricted to our candidates): TODO.
-- **Leave-one-country-out** (train on US and score India, and the reverse) as a proxy for
-  the unseen French test data: TODO / TODO.
+- **OOF macro F0.5 by S1 group:** 0.98367 overall.
+  - by group: singleton 0.9907 (99,930 S1) / one match 0.9412 (96,664) / several matches
+    0.9858 (1,591,596)
+  - by country: India 0.97949, US 0.98647
+- **Unseen-country simulation**, a proxy for France. Train on one country, score the other,
+  with equal training size:
+
+  | target | trained on the target country | trained on the other country | loss |
+  |---|---|---|---|
+  | India | 0.97743 | 0.90008 (US-trained) | 7.7 points |
+  | US | 0.98533 | 0.97231 (India-trained) | 1.3 points |
+
+  The best threshold barely differed from the transferred one, so the loss comes from
+  scoring, not calibration.
+- **Error analysis** (out-of-fold, lost points = 100 × (1 − macro F0.5)):
+  - India: missing candidates 0.45, true pair below threshold 0.27, prediction with no true entity 0.13
+  - US: missing candidates 0.22, true pair below threshold 0.46, prediction with no true entity 0.15
+
+  Remaining hard cases:
+  - Indic-script names with truncated addresses
+  - typo'd names with empty addresses
+  - look-alike S1 entities sharing a name or an address
 
 ## 7. Other relevant information
 
-- Reproducibility: fixed seeds, pinned `requirements.txt`, single command
-  (`pipeline.py all`), CPU only; runtime ≈ TODO min on 4 cores.
-- License compliance: LightGBM (MIT), scikit-learn (BSD-3), rapidfuzz (MIT), Unidecode (GPL-2,
-  preprocessing library only, not a model). TODO: swap it for `anyascii` (ISC) if organisers object.
-- Things tried and not adopted: TODO.
+- **Reproducibility:** pinned `requirements.txt`, fixed hash-based folds and seeds.
+  - The data part runs as `pipeline.py data`; the model part as `pipeline.py model`, which
+    trains, tunes the decision and predicts.
+  - Each step skips itself when its cached outputs are newer than its inputs.
+- **Runtime:** measured on 32 CPU cores + one NVIDIA L4 (Modal).
+  - Embedding neighbours (both splits): 1.2 h. Pre-filter: 17 min. Features: 29 min.
+  - Model: 1.4 h to train and about 15 min to predict.
+  - Token candidate search and normalisation were cached from earlier runs and not re-timed.
+- **Licenses:** XGBoost (Apache-2.0), LightGBM (MIT), scikit-learn (BSD-3), rapidfuzz (MIT),
+  PyTorch (BSD), sentence-transformers and MiniLM (Apache-2.0). Unidecode (GPL-2) is used only
+  as a preprocessing library, not a model.
+- **Tried and not adopted:**
+  - Pseudo-label self-training on test: the unseen-country simulation was mixed, so it was
+    not submitted.
+  - A fine-tuned MiniLM cross-encoder stacked into the GBM (`crossenc.py`, implemented and
+    tested): not run at full scale for lack of time before the deadline.
+  - Per-S1 decision rules: +0.0002 out-of-fold (Section 5).
