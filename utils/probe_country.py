@@ -6,7 +6,7 @@ match list.  An empty list scores 1 for a true singleton and 0 otherwise, so
     LB_full - LB_probe = w_c * (F_c - s_c)      ->      F_c = s_c + (LB_full - LB_probe) / w_c
 
 w_c = share of test S1 entities in country c (printed below), s_c = singleton share of country c
-(~0.17-0.18 in train for both countries; the same generator made test).  Two probes (blank france,
+(train: 99,930 of 1,788,190 S1 = 0.056; the same generator made test).  Two probes (blank france,
 blank us) give France, US and - by subtraction from LB_full - India.
 
   python utils/probe_country.py --country france
@@ -37,7 +37,7 @@ def main():
     ap.add_argument("--estimate", action="store_true", help="compute F_country from two leaderboard scores")
     ap.add_argument("--lb", type=float, help="leaderboard score of the full submission")
     ap.add_argument("--lb-probe", type=float, help="leaderboard score of the probe submission")
-    ap.add_argument("--singleton", type=float, default=0.1745, help="singleton share assumed for the country")
+    ap.add_argument("--singleton", type=float, default=0.056, help="singleton share assumed for the country")
     a = ap.parse_args()
     c = a.country.strip().lower()
     s1, w = weights(a.s1)

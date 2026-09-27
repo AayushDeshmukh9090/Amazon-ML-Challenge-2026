@@ -35,7 +35,7 @@ CPU = 32            # cores: prep / blocking / features run in process pools
 MEMORY_MB = 131072  # 128 GB: ~12M-record token matrices + ~100M candidate pairs
 TIMEOUT_S = 12 * 3600   # ceiling, not cost; caches + checkpoints make a relaunch resume
 GPU = os.environ.get("ER_GPU", "L4")   # NVIDIA GPU for XGBoost + transformer steps; ER_GPU=L40S at deploy time for ~2x
-GPU_TASKS = {"full", "data", "model", "train2", "predict2", "diagnose", "selftrain", "embblock", "embed", "crossenc"}
+GPU_TASKS = {"full", "data", "model", "train2", "predict2", "diagnose", "selftrain", "embblock", "embed", "crossenc", "decide"}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -74,6 +74,7 @@ DOWNLOADS = [
     ("work/errors_report.md", "work/errors_report.md"),
     ("work/errors_sample.tsv", "work/errors_sample.tsv"),
     ("work/selftrain_report.md", "work/selftrain_report.md"),
+    ("work/decide_report.md", "work/decide_report.md"),
     ("output_selftrain/matching_results.tsv", "output_selftrain/matching_results.tsv"),
     ("output_selftrain/candidate_pairs.tsv", "output_selftrain/candidate_pairs.tsv"),
     ("logs/last_run.log", "work/modal_last_run.log"),

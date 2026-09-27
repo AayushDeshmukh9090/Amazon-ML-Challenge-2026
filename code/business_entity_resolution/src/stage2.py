@@ -354,7 +354,12 @@ def predict(work_dir, out_dir):
     s1, o = X["s1"].to_numpy(), X["o"].to_numpy()
     ck_test = load_prep(work_dir, "test", (1,), ["ckey"])["ckey"].to_numpy()
     thresholds = b.get("thresholds", {"_global": b["threshold"]})
-    keep = one_to_one_best(s1, o, p) & (p >= pair_thresholds(thresholds, ck_test[s1]))
+    if b.get("decision"):                                   # per-S1 rule tuned by decide2.py
+        import decide2
+        keep = decide2.apply(b["decision"], s1, o, p)
+        log(f"decision rule {b['decision']}")
+    else:
+        keep = one_to_one_best(s1, o, p) & (p >= pair_thresholds(thresholds, ck_test[s1]))
     s1_ids = load_prep(work_dir, "test", (1,), ["entity_id"])["entity_id"].to_numpy()
     o_ids = load_prep(work_dir, "test", (2, 3), ["entity_id"])["entity_id"].to_numpy()
     os.makedirs(out_dir, exist_ok=True)
@@ -375,7 +380,7 @@ def predict(work_dir, out_dir):
     # identity card of this output, so an uploaded file can always be traced to its run
     info = {"written_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
             "model_levels": "L1+L2" if b["use_l2"] else "L1", "n_fold_models": len(b["l1"]),
-            "thresholds": thresholds, "n_matches": int(keep.sum()), "n_candidates": int(len(X)),
+            "thresholds": thresholds, "decision": b.get("decision"), "n_matches": int(keep.sum()), "n_candidates": int(len(X)),
             "per_country": per_country}
     with open(os.path.join(out_dir, "run_info.json"), "w") as fh:
         json.dump(info, fh, indent=1)

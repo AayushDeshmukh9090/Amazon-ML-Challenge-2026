@@ -346,6 +346,10 @@ def cmd_model(args, which=("train2", "predict2")):
     if "train2" in which:
         stage2.train(args.data_dir, args.work_dir, n_folds=args.k_folds, max_rounds=args.max_rounds,
                      backend=args.gbm)
+        which = tuple(which) + ("decide",)
+    if "decide" in which:
+        import decide2
+        decide2.run(args.data_dir, args.work_dir)
     if "predict2" in which:
         stage2.predict(args.work_dir, args.out_dir)
 
@@ -354,7 +358,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["data", "model", "full",
                                     "synonyms", "prep", "block", "embblock", "prefilter", "features2", "embed",
-                                    "crossenc", "train2",
+                                    "crossenc", "train2", "decide",
                                     "predict2", "diagnose", "selftrain", "errors",
                                     "blocking", "features", "train", "predict", "all"])
     ap.add_argument("--data-dir", default="dataset")
@@ -401,6 +405,7 @@ def main():
           "features2": cmd_features2, "embed": cmd_embed, "embblock": cmd_embblock, "crossenc": cmd_crossenc, "data": cmd_data,
           "train2": lambda a: cmd_model(a, ("train2",)), "predict2": lambda a: cmd_model(a, ("predict2",)),
           "model": cmd_model,
+          "decide": lambda a: cmd_model(a, ("decide", "predict2")),
           "diagnose": lambda a: __import__("diagnose").run(a.data_dir, a.work_dir, a.max_rounds),
           "errors": lambda a: __import__("errors").run(a.data_dir, a.work_dir),
           "selftrain": lambda a: __import__("selftrain").run(a.data_dir, a.work_dir, a.out_dir, a.k_folds,
